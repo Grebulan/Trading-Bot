@@ -1,7 +1,14 @@
 import yfinance as yf
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from transformers import pipeline
 
-analyzer = SentimentIntensityAnalyzer()
+_finbert = None
+
+def get_finbert():
+    global _finbert
+    if _finbert is None:
+        _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
+                            tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
+    return _finbert
 
 def get_sentiment(ticker):
     try:
@@ -10,9 +17,8 @@ def get_sentiment(ticker):
         if not news:
             return 0.0
 
-        scores = []
+        headlines = []
         for article in news[:10]:
-            # yfinance news structure has title in 'content' dict
             title = ''
             try:
                 title = article.get('title', '') or \
@@ -21,16 +27,25 @@ def get_sentiment(ticker):
             except:
                 pass
             if title:
-                score = analyzer.polarity_scores(title)['compound']
-                scores.append(score)
+                headlines.append(title)
 
-        if not scores:
+        if not headlines:
             return 0.0
 
-        avg = sum(scores) / len(scores)
+        results = get_finbert()(headlines, truncation=True, max_length=512, batch_size=8)
+        scores = []
+        for r in results:
+            if r['label'] == 'positive':
+                scores.append(r['score'])
+            elif r['label'] == 'negative':
+                scores.append(-r['score'])
+            else:
+                scores.append(0.0)
+
+        avg = round(sum(scores) / len(scores), 3)
         label = '🟢 Positive' if avg > 0.05 else '🔴 Negative' if avg < -0.05 else '⚪ Neutral'
         print(f"  📰 {ticker}: {label} ({avg:.2f}) from {len(scores)} headlines")
-        return round(avg, 3)
+        return avg
 
     except Exception as e:
         print(f"  📰 {ticker}: Sentiment error ({e})")

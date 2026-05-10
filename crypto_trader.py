@@ -7,6 +7,7 @@ Runs every 2 hours via crontab.
 import os
 import json
 import joblib
+import requests
 import pandas as pd
 import yfinance as yf
 import alpaca_trade_api as tradeapi
@@ -45,11 +46,37 @@ CRYPTOS = {
     'ADA/USD':  'ADA-USD',
 }
 
-STOP_LOSS    = 0.15
-TAKE_PROFIT  = 0.10
-CONFIDENCE   = 0.65
-MIN_CASH     = 500.0
-MAX_POSITION = 0.10
+FEAR_GREED_MIN   = 20    # skip buys during extreme fear / capitulation
+
+STOP_LOSS        = 0.15   # 15% trailing — moves up with price
+TAKE_PROFIT      = 0.25   # 25% — let crypto winners run
+CONFIDENCE       = 0.65
+MIN_CASH         = 500.0
+MAX_POSITION     = 0.10
+MAX_POSITIONS    = 5      # max simultaneous crypto positions
+VIX_BUY_THRESHOLD = 30   # skip buys in high-volatility regimes
+
+HIGHWATER_FILE   = '/home/jv/crypto_highwater.json'
+
+def load_highwater():
+    if os.path.exists(HIGHWATER_FILE):
+        with open(HIGHWATER_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_highwater(hw):
+    with open(HIGHWATER_FILE, 'w') as f:
+        json.dump(hw, f, indent=2)
+
+def get_fear_greed():
+    """Fetch Crypto Fear & Greed Index (0=Extreme Fear, 100=Extreme Greed)."""
+    try:
+        r = requests.get('https://api.alternative.me/fng/?limit=1', timeout=10)
+        data = r.json()['data'][0]
+        return int(data['value']), data['value_classification']
+    except Exception as e:
+        print(f"  ⚠️  Fear & Greed fetch failed: {e}")
+        return None, None
 
 def safe_yf_download(symbol, period, interval, progress=False, timeout=30):
     """yf.download() with a timeout to prevent indefinite hangs."""
@@ -85,6 +112,14 @@ def get_market_indicators():
         spy['SPY_Trend']      = (spy['SPY_SMA_24'] > spy['SPY_SMA_168']).astype(int)
         spy['SPY_Return_24h'] = spy['SPY'].pct_change(24)
 
+        btc_daily = safe_yf_download('BTC-USD', period="300d", interval="1d")
+        if btc_daily is None:
+            raise Exception("BTC daily download timed out")
+        btc_daily.columns = [col[0] if isinstance(col, tuple) else col for col in btc_daily.columns]
+        btc_daily = btc_daily[['Close']].rename(columns={'Close': 'BTC'})
+        btc_daily['BTC_SMA_200'] = btc_daily['BTC'].rolling(200).mean()
+        btc_regime = int(btc_daily['BTC'].iloc[-1] > btc_daily['BTC_SMA_200'].iloc[-1])
+
         btc = safe_yf_download('BTC-USD', period="30d", interval="1h")
         if btc is None:
             raise Exception("BTC download timed out")
@@ -105,6 +140,7 @@ def get_market_indicators():
             'BTC_Return':     float(btc['BTC_Return'].iloc[-1]),
             'BTC_Trend':      float(btc['BTC_Trend'].iloc[-1]),
             'BTC_Return_24h': float(btc['BTC_Return_24h'].iloc[-1]),
+            'BTC_Regime':     btc_regime,
         }
     except Exception as e:
         print(f"  Market indicator error: {e}")
@@ -126,6 +162,7 @@ def get_crypto_features(yf_symbol):
     df['Return']       = df['Close'].pct_change()
     df['Return_24h']   = df['Close'].pct_change(24)
     df['Return_72h']   = df['Close'].pct_change(72)
+    df['Return_168h']  = df['Close'].pct_change(168)
     df['Volatility']   = df['Return'].rolling(24).std()
     df['High_Low']     = (df['High'] - df['Low']) / df['Close']
     bb_mid             = df['Close'].rolling(48).mean()
@@ -192,10 +229,20 @@ def main():
 
     print("\n  🌍 Fetching market indicators...")
     mkt = get_market_indicators()
+    fg_value, fg_label = get_fear_greed()
     if mkt:
-        btc_trend = '↑' if mkt['BTC_Trend'] else '↓'
-        spy_trend = '↑' if mkt['SPY_Trend'] else '↓'
-        print(f"  VIX: {mkt['VIX']:.1f} | SPY: {spy_trend} | BTC: {btc_trend}")
+        btc_trend  = '↑' if mkt['BTC_Trend'] else '↓'
+        spy_trend  = '↑' if mkt['SPY_Trend'] else '↓'
+        fg_str     = f"{fg_value} ({fg_label})" if fg_value is not None else "N/A"
+        regime_str = '✅ Bull' if mkt.get('BTC_Regime') else '🚫 Bear'
+        print(f"  VIX: {mkt['VIX']:.1f} | SPY: {spy_trend} | BTC: {btc_trend} | F&G: {fg_str} | Regime: {regime_str}")
+
+    hw = load_highwater()
+    # Remove stale entries for positions we no longer hold
+    for sym in list(hw.keys()):
+        if sym not in positions:
+            del hw[sym]
+    save_highwater(hw)
 
     print("\n  📊 Fetching crypto data...")
     all_dfs     = {}
@@ -250,20 +297,37 @@ def main():
             # Sentiment
             sent_score = get_crypto_sentiment(symbol)
 
-            # Stop loss / take profit
+            # Trailing stop / take profit
             if alpaca_symbol in positions:
-                pos    = positions[alpaca_symbol]
-                entry  = float(pos.avg_entry_price)
-                change = (current_price - entry) / entry
-                print(f"  Position: {pos.qty} coins, entry ${entry:,.4f}, P&L {change:+.1%}")
+                pos   = positions[alpaca_symbol]
+                entry = float(pos.avg_entry_price)
+                pnl   = (current_price - entry) / entry
 
-                if change <= -STOP_LOSS:
-                    print(f"  🛑 STOP LOSS triggered ({change:+.1%})")
+                # Update high-water mark
+                peak = hw.get(alpaca_symbol, entry)
+                if current_price > peak:
+                    hw[alpaca_symbol] = current_price
+                    peak              = current_price
+                    save_highwater(hw)
+
+                trail_pct  = (current_price - peak) / peak
+                trail_stop = peak * (1 - STOP_LOSS)
+                locked_pct = (peak - entry) / entry
+                print(f"  Position: {pos.qty} coins, entry ${entry:,.4f}, P&L {pnl:+.1%} | Peak ${peak:,.4f} (+{locked_pct:.1%}) | Trail stop ${trail_stop:,.4f}")
+
+                if trail_pct <= -STOP_LOSS:
+                    print(f"  🛑 Trailing stop — {trail_pct:.1%} from peak ${peak:,.4f} (locked {locked_pct:+.1%})")
                     place_trade(symbol, 'sell', cash, current_price)
+                    if alpaca_symbol in hw:
+                        del hw[alpaca_symbol]
+                        save_highwater(hw)
                     continue
-                elif change >= TAKE_PROFIT:
-                    print(f"  🎯 TAKE PROFIT triggered ({change:+.1%})")
+                elif pnl >= TAKE_PROFIT:
+                    print(f"  🎯 TAKE PROFIT triggered ({pnl:+.1%})")
                     place_trade(symbol, 'sell', cash, current_price)
+                    if alpaca_symbol in hw:
+                        del hw[alpaca_symbol]
+                        save_highwater(hw)
                     continue
 
             # Confidence check
@@ -280,6 +344,18 @@ def main():
                 continue
 
             if signal == 'BUY' and alpaca_symbol not in positions:
+                if mkt and not mkt.get('BTC_Regime'):
+                    print(f"  ⏸️  Skipping BUY — BTC below 200-day MA (bear regime)")
+                    continue
+                if mkt and mkt['VIX'] > VIX_BUY_THRESHOLD:
+                    print(f"  ⏸️  Skipping BUY — high VIX ({mkt['VIX']:.1f})")
+                    continue
+                if fg_value is not None and fg_value < FEAR_GREED_MIN:
+                    print(f"  ⏸️  Skipping BUY — extreme fear ({fg_value} {fg_label})")
+                    continue
+                if len(positions) >= MAX_POSITIONS:
+                    print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
+                    continue
                 place_trade(symbol, 'buy', cash, current_price)
             elif signal == 'SELL' and alpaca_symbol in positions:
                 place_trade(symbol, 'sell', cash, current_price)

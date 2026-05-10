@@ -75,7 +75,7 @@ def update_outcomes():
         if entry['outcome'] is not None:
             continue
 
-        signal_time = datetime.fromisoformat(entry['timestamp'])
+        signal_time = datetime.fromisoformat(entry['time'])
         asset_type  = entry.get('asset_type', 'stock')
 
         # Resolution window

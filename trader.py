@@ -29,18 +29,45 @@ BASE_URL = "https://paper-api.alpaca.markets"
 api      = tradeapi.REST(ENV['ALPACA_KEY'], ENV['ALPACA_SECRET'], BASE_URL, api_version='v2')
 
 TICKERS = [
-    'AAPL','GOOGL','MSFT','META','AMZN','TSLA','NVDA',
-    'JPM','BAC','GS','PFE','MRK','RIVN','NIO',
-    'WMT','TGT','AMD','QCOM','MS'
+    'AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD',  # Tech
+    'NVDA','AMD','QCOM','ARM',                            # Semiconductors
+    'TSLA','SHOP','COIN',                                 # Growth
+    'JPM','BAC','GS','MS',                               # Finance
+    'TGT',                                                # Retail
+    'OXY',                                                # Energy
+    'GOLD',                                               # Commodities
+    'UNH','ISRG',                                         # Healthcare
+    'CAT',                                                # Industrials
 ]
 SECTORS = {
-    'Tech':    ['AAPL','GOOGL','MSFT','META','AMZN','NVDA','AMD','QCOM'],
-    'EV':      ['TSLA','RIVN','NIO'],
-    'Finance': ['JPM','BAC','GS','MS'],
-    'Pharma':  ['PFE','MRK'],
-    'Retail':  ['WMT','TGT'],
+    'Tech':       ['AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD'],
+    'Semi':       ['NVDA','AMD','QCOM','ARM'],
+    'Growth':     ['TSLA','SHOP','COIN'],
+    'Finance':    ['JPM','BAC','GS','MS'],
+    'Retail':     ['TGT'],
+    'Energy':     ['OXY'],
+    'Commodities':['GOLD'],
+    'Healthcare': ['UNH','ISRG'],
+    'Industrial': ['CAT'],
 }
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
+
+STOP_LOSS       = 0.12   # 12% trailing — moves up with price
+TAKE_PROFIT     = 0.20   # 20% — let winners run for weeks
+MAX_POSITIONS   = 8      # max simultaneous stock positions
+VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
+
+HIGHWATER_FILE  = '/home/jv/stock_highwater.json'
+
+def load_highwater():
+    if os.path.exists(HIGHWATER_FILE):
+        with open(HIGHWATER_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_highwater(hw):
+    with open(HIGHWATER_FILE, 'w') as f:
+        json.dump(hw, f, indent=2)
 
 FRACTIONABLE_CACHE = {}
 
@@ -63,14 +90,16 @@ def get_market_indicators():
     vix.columns = [col[0] if isinstance(col, tuple) else col for col in vix.columns]
     vix = vix[['Close']].rename(columns={'Close': 'VIX'})
 
-    spy = yf.download('SPY', period="60d", interval="1d", progress=False)
+    spy = yf.download('SPY', period="300d", interval="1d", progress=False)
     spy.columns = [col[0] if isinstance(col, tuple) else col for col in spy.columns]
     spy = spy[['Close']].rename(columns={'Close': 'SPY'})
     spy['SPY_Return']    = spy['SPY'].pct_change()
     spy['SPY_SMA_10']    = spy['SPY'].rolling(10).mean()
     spy['SPY_SMA_50']    = spy['SPY'].rolling(50).mean()
+    spy['SPY_SMA_200']   = spy['SPY'].rolling(200).mean()
     spy['SPY_Trend']     = (spy['SPY_SMA_10'] > spy['SPY_SMA_50']).astype(int)
     spy['SPY_Return_5d'] = spy['SPY'].pct_change(5)
+    spy['SPY_Regime']    = (spy['SPY'] > spy['SPY_SMA_200']).astype(int)
 
     qqq = yf.download('QQQ', period="60d", interval="1d", progress=False)
     qqq.columns = [col[0] if isinstance(col, tuple) else col for col in qqq.columns]
@@ -79,11 +108,12 @@ def get_market_indicators():
     qqq['QQQ_Trend']     = (qqq['QQQ'].rolling(10).mean() > qqq['QQQ'].rolling(50).mean()).astype(int)
     qqq['QQQ_Return_5d'] = qqq['QQQ'].pct_change(5)
 
-    market = vix.join(spy[['SPY_Return','SPY_SMA_10','SPY_SMA_50','SPY_Trend','SPY_Return_5d']], how='inner')
+    market = vix.join(spy[['SPY_Return','SPY_SMA_10','SPY_SMA_50','SPY_Trend','SPY_Return_5d','SPY_Regime']], how='inner')
     market = market.join(qqq[['QQQ_Return','QQQ_Trend','QQQ_Return_5d']], how='inner')
     market.dropna(inplace=True)
     row = market.iloc[-1]
-    print(f"  VIX: {float(row['VIX']):.1f} | SPY: {'↑' if row['SPY_Trend'] else '↓'} | QQQ: {'↑' if row['QQQ_Trend'] else '↓'}")
+    regime_str = '✅ Bull' if row['SPY_Regime'] else '🚫 Bear'
+    print(f"  VIX: {float(row['VIX']):.1f} | SPY: {'↑' if row['SPY_Trend'] else '↓'} | QQQ: {'↑' if row['QQQ_Trend'] else '↓'} | Regime: {regime_str}")
     return row
 
 def get_features(ticker):
@@ -100,6 +130,7 @@ def get_features(ticker):
     df['Return']      = df['Close'].pct_change()
     df['Return_5d']   = df['Close'].pct_change(5)
     df['Return_10d']  = df['Close'].pct_change(10)
+    df['Return_20d']  = df['Close'].pct_change(20)
     df['Volatility']  = df['Return'].rolling(10).std()
     df['High_Low']    = (df['High'] - df['Low']) / df['Close']
     bb_mid            = df['Close'].rolling(20).mean()
@@ -159,29 +190,38 @@ def run():
 
     mkt = get_market_indicators()
 
-    print("  📊 Fetching sector data...")
+    print("  📊 Fetching ticker data...")
+    all_dfs     = {}
     all_returns = {}
     for ticker in TICKERS:
         try:
-            df = yf.download(ticker, period="10d", interval="1d", progress=False)
-            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-            ret = df['Close'].pct_change()
+            df = get_features(ticker)
+            all_dfs[ticker]     = df
             all_returns[ticker] = {
-                'latest': float(ret.iloc[-1]),
-                '5d':     float(ret.iloc[-5:].mean())
+                'latest': float(df['Return'].iloc[-1]),
+                '5d':     float(df['Return'].iloc[-5:].mean()),
             }
-        except:
+        except Exception as e:
+            print(f"  ❌ {ticker}: {e}")
             all_returns[ticker] = {'latest': 0.0, '5d': 0.0}
 
     positions = {p.symbol: p for p in api.list_positions()}
     signals_logged = 0
 
-    from sentiment import get_sentiment
+    hw = load_highwater()
+    # Remove stale entries for positions we no longer hold
+    for sym in list(hw.keys()):
+        if sym not in positions:
+            del hw[sym]
+    save_highwater(hw)
 
     for ticker in TICKERS:
         print(f"\n📊 {ticker}")
+        if ticker not in all_dfs:
+            print(f"  ⚠️  No data, skipping")
+            continue
         try:
-            df            = get_features(ticker)
+            df            = all_dfs[ticker]
             latest        = df.iloc[-1].copy()
             current_price = float(df['Close'].iloc[-1])
             mom, mom_5d   = get_sector_momentum(ticker, all_returns)
@@ -212,20 +252,38 @@ def run():
                 entry_price = float(pos.avg_entry_price)
                 pnl_pct     = (current_price - entry_price) / entry_price
 
-                if pnl_pct <= -0.05:
-                    print(f"  🛑 Stop-loss triggered ({pnl_pct:.1%}) — SELLING")
+                # Update high-water mark
+                peak = hw.get(ticker, entry_price)
+                if current_price > peak:
+                    hw[ticker] = current_price
+                    peak       = current_price
+                    save_highwater(hw)
+
+                trail_pct  = (current_price - peak) / peak
+                trail_stop = peak * (1 - STOP_LOSS)
+                locked_pct = (peak - entry_price) / entry_price
+                print(f"  Position: {float(pos.qty):.4f} shares, entry ${entry_price:,.2f}, P&L {pnl_pct:+.1%} | Peak ${peak:,.2f} (+{locked_pct:.1%}) | Trail stop ${trail_stop:,.2f}")
+
+                if trail_pct <= -STOP_LOSS:
+                    print(f"  🛑 Trailing stop — {trail_pct:.1%} from peak ${peak:,.2f} (locked {locked_pct:+.1%})")
                     api.submit_order(symbol=ticker, qty=float(pos.qty),
                                      side='sell', type='market', time_in_force='day')
-                    log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'stop_loss')
+                    log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'trailing_stop')
                     signals_logged += 1
+                    if ticker in hw:
+                        del hw[ticker]
+                        save_highwater(hw)
                     continue
 
-                if pnl_pct >= 0.03:
+                if pnl_pct >= TAKE_PROFIT:
                     print(f"  🎯 Take-profit triggered ({pnl_pct:.1%}) — SELLING")
                     api.submit_order(symbol=ticker, qty=float(pos.qty),
                                      side='sell', type='market', time_in_force='day')
                     log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'take_profit')
                     signals_logged += 1
+                    if ticker in hw:
+                        del hw[ticker]
+                        save_highwater(hw)
                     continue
 
                 if pred == 0 and conf >= 0.60:
@@ -237,14 +295,28 @@ def run():
                         api.submit_order(symbol=ticker, qty=float(pos.qty),
                                          side='sell', type='market', time_in_force='day')
                         log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'ml_signal')
+                        if ticker in hw:
+                            del hw[ticker]
+                            save_highwater(hw)
                     signals_logged += 1
                     continue
                 else:
-                    print(f"  ⏸️  Holding position (P&L: {pnl_pct:.1%})")
                     continue
 
             # --- BUY logic ---
             if pred == 1 and conf >= 0.60:
+                if not mkt['SPY_Regime']:
+                    print(f"  ⏸️  Skipping BUY — SPY below 200-day MA (bear regime)")
+                    continue
+
+                if float(mkt['VIX']) > VIX_BUY_THRESHOLD:
+                    print(f"  ⏸️  Skipping BUY — high VIX ({float(mkt['VIX']):.1f})")
+                    continue
+
+                if len(positions) >= MAX_POSITIONS:
+                    print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
+                    continue
+
                 if sent_score < -0.05:
                     print(f"  ⏸️  Skipping BUY — negative news ({sent_score:.2f})")
                     log_signal(ticker, 'BUY', conf, sent_score, current_price, False, 'sentiment_override')
@@ -255,7 +327,7 @@ def run():
                     print(f"  ⏸️  Skipping BUY — insufficient cash (${cash:,.2f})")
                     continue
 
-                position_size = min(cash * 0.10, cash - 100)
+                position_size = min(cash * 0.08, cash - 100)
                 fractionable  = is_fractionable(ticker)
 
                 if fractionable:

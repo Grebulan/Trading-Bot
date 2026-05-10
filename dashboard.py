@@ -7,11 +7,25 @@ import pandas as pd
 import yfinance as yf
 import alpaca_trade_api as tradeapi
 from datetime import datetime
-from flask import Flask, render_template_string
-from sentiment import get_sentiment
-from crypto_sentiment import get_crypto_sentiment
+from flask import Flask, render_template_string, request, Response
+import functools
+from sentiment import get_sentiment  # used only in background refresh thread
+
 
 app = Flask(__name__)
+
+DASHBOARD_USER     = 'jv'
+DASHBOARD_PASSWORD = 'negril'
+
+def requires_auth(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or auth.username != DASHBOARD_USER or auth.password != DASHBOARD_PASSWORD:
+            return Response('Authorisation required', 401,
+                            {'WWW-Authenticate': 'Basic realm="Trading Dashboard"'})
+        return f(*args, **kwargs)
+    return decorated
 
 STOCK_SENTIMENT_CACHE = '/home/jv/stock_sentiment_cache.json'
 STOCK_SENTIMENT_TTL   = 3600  # 1 hour
@@ -23,13 +37,22 @@ def load_stock_sentiment_cache():
     return {}
 
 def _parse_history_time(t):
-    """Parse a portfolio history timestamp — handles both ISO and legacy MM/DD HH:MM."""
+    """Parse a portfolio history timestamp — handles both ISO and legacy MM/DD HH:MM.
+
+    Python 3.9/3.10 fromisoformat() cannot handle timezone-aware strings
+    (e.g. '2025-04-04T14:00:00+00:00').  We strip the trailing tz offset
+    before parsing so the comparison arithmetic stays consistent (all naive,
+    treated as local/UTC — doesn't matter as long as it's consistent).
+    """
     from datetime import datetime
+    import re
     if not t:
         return None
     try:
         if 'T' in t or (len(t) > 5 and t[4] == '-'):
-            return datetime.fromisoformat(t)
+            # Strip trailing timezone offset (+HH:MM or Z) for 3.9/3.10 compat
+            ts = re.sub(r'([+-]\d{2}:\d{2}|Z)$', '', t)
+            return datetime.fromisoformat(ts)
         # Legacy format: MM/DD HH:MM — assume current year
         year = datetime.now().year
         return datetime.strptime(f'{year}/{t}', '%Y/%m/%d %H:%M')
@@ -102,20 +125,28 @@ def build_chart_views(history_file='/home/jv/portfolio_history.json'):
             'cash_values':  [max(0, round(r['value'] - r['stock'] - r['crypto'], 2)) for r in data],
         }
 
-    # 24H — raw data, last 24 hours
+    earliest   = rows[0]['dt']
+    span_hours = (latest - earliest).total_seconds() / 3600
+
+    # 24H — raw data, last 24 hours (cap at 200 points to avoid chart clutter)
     cutoff_24h = latest - timedelta(hours=24)
     raw_24h    = [r for r in rows if r['dt'] >= cutoff_24h]
+    view_24h   = make_view(raw_24h if raw_24h else rows[-200:])
 
-    # 7D — resampled to 4h buckets, last 7 days
+    # 7D: if we have >24h of data, resample to 30-min buckets; else show all raw
     cutoff_7d  = latest - timedelta(hours=168)
     raw_7d     = [r for r in rows if r['dt'] >= cutoff_7d]
+    view_7d    = make_view(resample(raw_7d, 0.5) if span_hours > 24 else raw_7d)
 
-    # ALL — resampled to 4h buckets, everything
-    return {
-        '24h': make_view(raw_24h if raw_24h else rows[-48:]),
-        '7d':  make_view(resample(raw_7d, 4)),
-        'all': make_view(resample(rows, 4)),
-    }
+    # ALL: resample to 1h buckets if >48h of data, 30-min if >24h, else raw
+    if span_hours > 48:
+        view_all = make_view(resample(rows, 1))
+    elif span_hours > 24:
+        view_all = make_view(resample(rows, 0.5))
+    else:
+        view_all = make_view(rows)
+
+    return {'24h': view_24h, '7d': view_7d, 'all': view_all}
 
 def get_stock_sentiment_cached(ticker):
     """Return cached sentiment score, or 0.0 if cache missing/stale."""
@@ -164,9 +195,15 @@ def load_env():
 ENV      = load_env()
 BASE_URL = "https://paper-api.alpaca.markets"
 TICKERS  = [
-    'AAPL','GOOGL','MSFT','META','AMZN','TSLA','NVDA',
-    'JPM','BAC','GS','PFE','MRK','RIVN','NIO',
-    'WMT','TGT','AMD','QCOM','MS'
+    'AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD',  # Tech
+    'NVDA','AMD','QCOM','ARM',                            # Semiconductors
+    'TSLA','SHOP','COIN',                                 # Growth
+    'JPM','BAC','GS','MS',                               # Finance
+    'TGT',                                                # Retail
+    'OXY',                                                # Energy
+    'GOLD',                                               # Commodities
+    'UNH','ISRG',                                         # Healthcare
+    'CAT',                                                # Industrials
 ]
 COMPANY_NAMES = {
     'AAPL':     'Apple Inc.',
@@ -174,20 +211,25 @@ COMPANY_NAMES = {
     'MSFT':     'Microsoft',
     'META':     'Meta Platforms (Facebook)',
     'AMZN':     'Amazon',
-    'TSLA':     'Tesla',
+    'PLTR':     'Palantir Technologies',
+    'CRWD':     'CrowdStrike Holdings',
     'NVDA':     'NVIDIA',
+    'AMD':      'Advanced Micro Devices',
+    'QCOM':     'Qualcomm',
+    'ARM':      'Arm Holdings',
+    'TSLA':     'Tesla',
+    'SHOP':     'Shopify',
+    'COIN':     'Coinbase Global',
     'JPM':      'JPMorgan Chase',
     'BAC':      'Bank of America',
     'GS':       'Goldman Sachs',
-    'PFE':      'Pfizer',
-    'MRK':      'Merck & Co.',
-    'RIVN':     'Rivian Automotive',
-    'NIO':      'NIO Inc.',
-    'WMT':      'Walmart',
-    'TGT':      'Target',
-    'AMD':      'Advanced Micro Devices',
-    'QCOM':     'Qualcomm',
     'MS':       'Morgan Stanley',
+    'TGT':      'Target',
+    'OXY':      'Occidental Petroleum',
+    'GOLD':     'Barrick Gold',
+    'UNH':      'UnitedHealth Group',
+    'ISRG':     'Intuitive Surgical',
+    'CAT':      'Caterpillar Inc.',
     'BTC/USD':  'Bitcoin',
     'ETH/USD':  'Ethereum',
     'SOL/USD':  'Solana',
@@ -212,11 +254,15 @@ CRYPTOS  = {
     'ADA/USD':  'ADA-USD',
 }
 SECTORS = {
-    'Tech':    ['AAPL','GOOGL','MSFT','META','AMZN','NVDA','AMD','QCOM'],
-    'EV':      ['TSLA','RIVN','NIO'],
-    'Finance': ['JPM','BAC','GS','MS'],
-    'Pharma':  ['PFE','MRK'],
-    'Retail':  ['WMT','TGT'],
+    'Tech':       ['AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD'],
+    'Semi':       ['NVDA','AMD','QCOM','ARM'],
+    'Growth':     ['TSLA','SHOP','COIN'],
+    'Finance':    ['JPM','BAC','GS','MS'],
+    'Retail':     ['TGT'],
+    'Energy':     ['OXY'],
+    'Commodities':['GOLD'],
+    'Healthcare': ['UNH','ISRG'],
+    'Industrial': ['CAT'],
 }
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
@@ -321,6 +367,7 @@ def get_stock_features(ticker):
     df['Return']      = df['Close'].pct_change()
     df['Return_5d']   = df['Close'].pct_change(5)
     df['Return_10d']  = df['Close'].pct_change(10)
+    df['Return_20d']  = df['Close'].pct_change(20)
     df['Volatility']  = df['Return'].rolling(10).std()
     df['High_Low']    = (df['High'] - df['Low']) / df['Close']
     bb_mid            = df['Close'].rolling(20).mean()
@@ -350,6 +397,7 @@ def get_crypto_features(yf_symbol):
     df['Return']        = df['Close'].pct_change()
     df['Return_24h']    = df['Close'].pct_change(24)
     df['Return_72h']    = df['Close'].pct_change(72)
+    df['Return_168h']   = df['Close'].pct_change(168)
     df['Volatility']    = df['Return'].rolling(24).std()
     df['High_Low']      = (df['High'] - df['Low']) / df['Close']
     bb_mid              = df['Close'].rolling(48).mean()
@@ -397,10 +445,10 @@ HTML = """
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, sans-serif; background: #0f1117; color: #fff; }
     .topnav { display: flex; align-items: center; justify-content: space-between;
-              background: #1a1d2e; padding: 15px 20px; margin-bottom: 25px;
+              background: #1a1d2e; padding: 8px 20px; margin-bottom: 15px;
               border-bottom: 2px solid #252840; position: sticky; top: 0; z-index: 100; }
-    .topnav h1 { font-size: 1.2em; }
-    .topnav .subtitle { color: #888; font-size: 0.8em; }
+    .topnav h1 { font-size: 1.1em; display: inline; }
+    .topnav .subtitle { color: #888; font-size: 0.78em; margin-left: 14px; }
     .nav-buttons { display: flex; gap: 10px; }
     .nav-btn { padding: 8px 20px; border-radius: 8px; cursor: pointer; font-weight: bold;
                font-size: 0.95em; border: 2px solid transparent; transition: all 0.2s;
@@ -408,11 +456,19 @@ HTML = """
     .nav-btn.active { color: #fff; border-color: #448aff; background: #2e3250; }
     .page { display: none; padding: 0 20px 20px 20px; }
     .page.active { display: block; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-             gap: 15px; margin-bottom: 25px; }
+    .cards-row { display: flex; gap: 15px; margin-bottom: 25px; align-items: stretch; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+             gap: 15px; flex: 1; }
     .card { background: #1a1d2e; border-radius: 12px; padding: 18px; }
     .card h2 { font-size: 0.75em; color: #888; margin-bottom: 8px; }
     .card .value { font-size: 1.4em; font-weight: bold; }
+    .alloc-chart-wrap { background: #1a1d2e; border-radius: 12px; padding: 14px 18px;
+                        display: flex; flex-direction: column; justify-content: center;
+                        min-width: 220px; max-width: 260px; }
+    .alloc-chart-wrap h2 { font-size: 0.75em; color: #888; margin-bottom: 8px; }
+    .alloc-inner { display: flex; align-items: center; gap: 12px; }
+    .alloc-inner canvas { width: 90px !important; height: 90px !important; flex-shrink: 0; }
+    .alloc-legend { font-size: 0.75em; color: #aaa; line-height: 2; white-space: nowrap; }
     .card .value.small { font-size: 1em; }
     .green { color: #00c853; } .red { color: #ff1744; }
     .yellow { color: #ffd600; } .blue { color: #448aff; }
@@ -432,15 +488,20 @@ HTML = """
     .chart-header h2 { font-size: 1em; color: #888; }
     .chart-toggles { display: flex; gap: 8px; }
     .chart-toggle { padding: 4px 12px; border-radius: 20px; font-size: 0.75em;
-                    font-weight: bold; cursor: pointer; border: 2px solid; transition: all 0.2s; }
-    .chart-toggle.total  { border-color: #00c853; color: #00c853; }
-    .chart-toggle.stocks { border-color: #448aff; color: #448aff; }
-    .chart-toggle.crypto { border-color: #ffd600; color: #ffd600; }
-    .chart-toggle.active.total  { background: #00c853; color: #000; }
-    .chart-toggle.active.stocks { background: #448aff; color: #000; }
-    .chart-toggle.active.crypto { background: #ffd600; color: #000; }
+                    font-weight: bold; cursor: pointer; border: 2px solid; transition: all 0.2s;
+                    background: #0f1117; }
+    .chart-toggle.total  { border-color: #00c853; color: #00c853; background: #0f1117; }
+    .chart-toggle.stocks { border-color: #448aff; color: #448aff; background: #0f1117; }
+    .chart-toggle.crypto { border-color: #ffd600; color: #ffd600; background: #0f1117; }
+    .chart-toggle.cash   { border-color: #b0b8d8; color: #b0b8d8; background: #0f1117; }
+    .chart-toggle.active.total  { background: #00c853 !important; color: #000; }
+    .chart-toggle.active.stocks { background: #448aff !important; color: #000; }
+    .chart-toggle.active.crypto { background: #ffd600 !important; color: #000; }
+    .chart-toggle.active.cash   { background: #b0b8d8 !important; color: #000; }
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch;
+                    margin-bottom: 25px; border-radius: 12px; }
     table { width: 100%; border-collapse: collapse; background: #1a1d2e;
-            border-radius: 12px; overflow: hidden; margin-bottom: 25px; }
+            border-radius: 12px; overflow: hidden; margin-bottom: 0; }
     th { background: #252840; padding: 12px 15px; text-align: left; font-size: 0.8em; color: #888; }
     td { padding: 12px 15px; border-top: 1px solid #252840; font-size: 0.9em; }
     .badge { padding: 3px 10px; border-radius: 20px; font-size: 0.8em; font-weight: bold; }
@@ -459,6 +520,33 @@ HTML = """
                     transform: translateX(-50%); transition: opacity 0.15s;
                     pointer-events: none; }
     .tip:hover .tiptext { visibility: visible; opacity: 1; }
+    /* ── Mobile: compact header ── */
+    @media (max-width: 600px) {
+      .topnav { padding: 6px 12px; flex-wrap: nowrap; gap: 6px; }
+      .topnav h1 { font-size: 0.95em; }
+      .topnav .subtitle { display: none; }
+      .nav-header-right { flex-direction: column; gap: 2px; align-items: flex-end; }
+      .nav-header-right .nav-countdown { font-size: 0.68em; }
+      .nav-header-right .nav-counts { display: none; }
+      .nav-buttons { gap: 6px; }
+      .nav-btn { padding: 6px 12px; font-size: 0.82em; }
+      .ticker-wrap { padding: 7px 10px; margin-bottom: 15px; }
+      #ticker { font-size: 0.85em; gap: 24px; }
+      .page { padding: 0 10px 16px 10px; }
+      .cards-row { flex-direction: column; }
+      .alloc-chart-wrap { min-width: unset; max-width: unset; width: 100%; }
+      .cards { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+      .card { padding: 12px; }
+      .card .value { font-size: 1.2em; }
+      .market-bar { padding: 12px; gap: 16px; margin-bottom: 15px; }
+      .chart-wrap { padding: 12px; }
+      .chart-header { flex-wrap: wrap; gap: 6px; }
+      .chart-header h2 { width: 100%; margin-bottom: 0; }
+      .chart-toggle { padding: 3px 8px; font-size: 0.7em; }
+      th { padding: 8px 10px; }
+      td { padding: 8px 10px; font-size: 0.82em; }
+      body { overflow-x: hidden; }
+    }
   </style>
 </head>
 <body>
@@ -466,12 +554,17 @@ HTML = """
   <!-- STICKY TOP NAV -->
   <div class="topnav">
     <div>
-      <div class="topnav h1">🤖 Trading Bot</div>
-      <div class="subtitle">Updated: {{ updated }} &bull; auto-refresh 5min</div>
+      <span class="topnav h1">🤖 Trading Bot</span>
+      <span class="subtitle">Updated: {{ updated }} &bull; auto-refresh 5min</span>
     </div>
-    <div class="nav-buttons">
-      <div class="nav-btn active" onclick="switchPage('stocks', this)">📈 Stocks ({{ stocks|length }})</div>
-      <div class="nav-btn"       onclick="switchPage('crypto', this)">🪙 Crypto ({{ crypto|length }})</div>
+    <div class="nav-header-right" style="display:flex;align-items:center;gap:20px">
+      <span class="nav-countdown" style="font-size:0.78em;color:#888">
+        📈 <span id="nav-stock-countdown" style="font-weight:bold">--:--</span>
+      </span>
+      <span class="nav-countdown" style="font-size:0.78em;color:#888">
+        🪙 <span id="nav-crypto-countdown" style="font-weight:bold">--:--</span>
+      </span>
+      <span class="nav-counts" style="color:#555;font-size:0.82em">{{ stocks|length }}s · {{ crypto|length }}c</span>
     </div>
   </div>
 
@@ -501,19 +594,34 @@ HTML = """
     </div>
   </div>
 
-  <!-- STOCKS PAGE -->
-  <div id="page-stocks" class="page active">
+  <!-- COMBINED PAGE -->
+  <div id="page-main" class="page active">
 
-    <div class="cards">
-      <div class="card"><h2>💰 CASH</h2><div class="value green">${{ cash }}</div></div>
-      <div class="card"><h2>📈 PORTFOLIO</h2><div class="value">${{ portfolio }}</div></div>
-      <div class="card"><h2>📊 POSITIONS</h2><div class="value yellow">{{ position_count }}</div></div>
-      <div class="card"><h2>🎯 TODAY P&L</h2>
-        <div class="value {{ 'green' if pnl >= 0 else 'red' }}">${{ pnl }}</div></div>
-      <div class="card"><h2>🧠 STOCK MODEL</h2>
-        <div class="value small blue">{{ stock_model_info.get('accuracy','—') }}</div></div>
-      <div class="card"><h2>📅 TRAINED</h2>
-        <div class="value small">{{ stock_model_info.get('trained_at','—') }}</div></div>
+    <div class="cards-row">
+      <div class="cards">
+        <div class="card"><h2>💰 CASH</h2><div class="value green">${{ cash }}</div></div>
+        <div class="card"><h2>📈 PORTFOLIO</h2><div class="value">${{ portfolio }}</div></div>
+        <div class="card"><h2>📊 POSITIONS</h2><div class="value yellow">{{ position_count }}</div></div>
+        <div class="card"><h2>🎯 TODAY P&L</h2>
+          <div class="value {{ 'green' if pnl >= 0 else 'red' }}">${{ pnl }}</div></div>
+        <div class="card"><h2>🧠 STOCK MODEL</h2>
+          <div class="value small blue">{{ stock_model_info.get('accuracy','—') }}</div></div>
+        <div class="card"><h2>🪙 CRYPTO MODEL</h2>
+          <div class="value small blue">{{ crypto_model_info.get('accuracy','—') }}</div></div>
+        <div class="card"><h2>📅 TRAINED</h2>
+          <div class="value small">{{ stock_model_info.get('trained_at','—') }}</div></div>
+      </div>
+      <div class="alloc-chart-wrap">
+        <h2>📊 ALLOCATION</h2>
+        <div class="alloc-inner">
+          <canvas id="allocChart" width="100" height="100"></canvas>
+          <div class="alloc-legend">
+            <span style="color:#448aff">■</span> Stocks {{ stock_pct }}%<br>
+            <span style="color:#ffd600">■</span> Crypto {{ crypto_pct }}%<br>
+            <span style="color:#00c853">■</span> Cash {{ cash_pct }}%
+          </div>
+        </div>
+      </div>
     </div>
 
     {% if market %}
@@ -546,23 +654,65 @@ HTML = """
     <div class="chart-wrap">
       <div class="chart-header">
         <h2>📈 PORTFOLIO PERFORMANCE</h2>
-        <div class="chart-toggles">
-          <div class="chart-toggle total active"  onclick="toggleLine(0, this)">Total</div>
-          <div class="chart-toggle stocks active" onclick="toggleLine(1, this)">📈 Stocks</div>
-          <div class="chart-toggle crypto active" onclick="toggleLine(2, this)">🪙 Crypto</div>
-          <div class="chart-toggle cash active"   onclick="toggleLine(3, this)">💵 Cash</div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div style="display:flex;background:#252840;border-radius:20px;padding:2px">
+            <div id="pvbtn-24h" style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#888;transition:all 0.2s" onclick="setPortfolioView('24h')">24H</div>
+            <div id="pvbtn-7d"  style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;background:#2e3250;color:#fff;transition:all 0.2s" onclick="setPortfolioView('7d')">7D</div>
+          </div>
+          <div class="chart-toggles">
+            <div class="chart-toggle total active"  onclick="toggleLine(chart, 0, this)">Total</div>
+            <div class="chart-toggle stocks"        onclick="toggleLine(chart, 1, this)">📈 Stocks</div>
+            <div class="chart-toggle crypto"        onclick="toggleLine(chart, 2, this)">🪙 Crypto</div>
+            <div class="chart-toggle cash"          onclick="toggleLine(chart, 3, this)">💵 Cash</div>
+          </div>
         </div>
       </div>
-      <canvas id="portfolioChart" height="40"></canvas>
+      <canvas id="portfolioChart" height="120"></canvas>
     </div>
     {% endif %}
 
-    <h2 class="section-title">📊 Stock Signals</h2>
-    <table>
-      <tr><th>STOCK</th><th>PRICE</th><th>SIGNAL</th><th>CONFIDENCE</th><th>SENTIMENT</th><th>HOLDING</th></tr>
+    <h2 class="section-title">📂 Open Positions</h2>
+    <div class="table-scroll"><table>
+      <tr><th>ASSET</th><th>TYPE</th><th>QTY</th><th>BOUGHT AT</th><th>CURRENT</th><th>VALUE</th><th>UNREALISED P&L</th><th>TRAIL STOP</th><th>GAP</th></tr>
+      {% for p in stock_positions %}
+      <tr style="background:rgba(68,138,255,0.07)">
+        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
+        <td style="color:#448aff;font-size:0.8em">📈 Stock</td>
+        <td>{{ p.qty }} sh</td>
+        <td>${{ p.avg_price }}</td>
+        <td>${{ p.current }}</td>
+        <td>${{ p.value }}</td>
+        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
+        <td style="color:#f0a500">${{ p.trail_stop }}</td>
+        <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
+      </tr>
+      {% endfor %}
+      {% for p in crypto_positions_list %}
+      <tr style="background:rgba(255,214,0,0.06)">
+        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
+        <td style="color:#ffd600;font-size:0.8em">🪙 Crypto</td>
+        <td>{{ p.qty }} coins</td>
+        <td>${{ p.avg_price }}</td>
+        <td>${{ p.current }}</td>
+        <td>${{ p.value }}</td>
+        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
+        <td style="color:#f0a500">${{ p.trail_stop }}</td>
+        <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
+      </tr>
+      {% else %}
+        {% if not stock_positions %}
+      <tr><td colspan="9" style="padding:20px;text-align:center;color:#888">No open positions</td></tr>
+        {% endif %}
+      {% endfor %}
+    </table></div>
+
+    <h2 class="section-title">📡 Signals</h2>
+    <div class="table-scroll"><table>
+      <tr><th>ASSET</th><th>TYPE</th><th>PRICE</th><th>SIGNAL</th><th>CONFIDENCE</th><th>SENTIMENT</th><th>HOLDING</th></tr>
       {% for s in stocks %}
-      <tr>
+      <tr style="background:rgba(68,138,255,0.07)">
         <td><span class="tip"><strong>{{ s.ticker }}</strong><span class="tiptext">{{ s.name }}</span></span></td>
+        <td style="color:#448aff;font-size:0.8em">📈 Stock</td>
         <td>${{ s.price }}</td>
         <td>{% if s.signal == 'BUY' %}<span class="badge buy">▲ BUY</span>
             {% elif s.signal == 'SELL' %}<span class="badge sell">▼ SELL</span>
@@ -570,100 +720,13 @@ HTML = """
             {% else %}<span class="badge error">ERROR</span>{% endif %}</td>
         <td>{{ s.confidence }}</td>
         <td>{{ s.sentiment }}</td>
-        <td>{{ s.shares }} shares</td>
+        <td>{{ s.shares }} sh</td>
       </tr>
       {% endfor %}
-    </table>
-
-    <h2 class="section-title">📊 Open Stock Positions</h2>
-    <table>
-      <tr><th>STOCK</th><th>QTY</th><th>BOUGHT AT</th><th>CURRENT</th><th>VALUE</th><th>UNREALISED P&L</th></tr>
-      {% for p in stock_positions %}
-      <tr>
-        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
-        <td>{{ p.qty }} shares</td>
-        <td>${{ p.avg_price }}</td>
-        <td>${{ p.current }}</td>
-        <td>${{ p.value }}</td>
-        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">
-          {{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="6" style="padding:20px;text-align:center;color:#888">No open stock positions</td></tr>
-      {% endfor %}
-    </table>
-
-    <h2 class="section-title">📋 Recent Stock Orders</h2>
-    <table>
-      <tr><th>TIME</th><th>STOCK</th><th>ACTION</th><th>QTY</th><th>PRICE</th></tr>
-      {% for o in orders %}
-      <tr>
-        <td>{{ o.time }}</td>
-        <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
-        <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
-            {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
-        <td>{{ o.qty }}</td><td>${{ o.price }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-  </div>
-
-  <!-- CRYPTO PAGE -->
-  <div id="page-crypto" class="page">
-
-    <div class="cards">
-      <div class="card"><h2>💰 CASH</h2><div class="value green">${{ cash }}</div></div>
-      <div class="card"><h2>📈 PORTFOLIO</h2><div class="value">${{ portfolio }}</div></div>
-      <div class="card"><h2>🪙 OPEN</h2><div class="value yellow">{{ crypto_positions }}</div></div>
-      <div class="card"><h2>🎯 TODAY P&L</h2>
-        <div class="value {{ 'green' if pnl >= 0 else 'red' }}">${{ pnl }}</div></div>
-      <div class="card"><h2>🧠 CRYPTO MODEL</h2>
-        <div class="value small blue">{{ crypto_model_info.get('accuracy','—') }}</div></div>
-      <div class="card"><h2>📅 TRAINED</h2>
-        <div class="value small">{{ crypto_model_info.get('trained_at','—') }}</div></div>
-    </div>
-
-    {% if market %}
-    <div class="market-bar">
-      <div class="market-item">
-        <h2>😱 VIX</h2>
-        <div class="val {% if market.vix < 20 %}vix-low{% elif market.vix < 30 %}vix-mid{% else %}vix-high{% endif %}">
-          {{ market.vix }} {% if market.vix < 20 %}😊{% elif market.vix < 30 %}😐{% else %}😱{% endif %}
-        </div>
-      </div>
-      <div class="market-item"><h2>📊 S&P 500</h2>
-        <div class="val {{ 'green' if market.spy_trend else 'red' }}">
-          {{ '↑ Up' if market.spy_trend else '↓ Down' }}</div></div>
-      <div class="market-item"><h2>💻 NASDAQ</h2>
-        <div class="val {{ 'green' if market.qqq_trend else 'red' }}">
-          {{ '↑ Up' if market.qqq_trend else '↓ Down' }}</div></div>
-      <div class="market-item"><h2>₿ BITCOIN</h2>
-        <div class="val {{ 'green' if market.btc_trend else 'red' }}">
-          {{ '↑ Up' if market.btc_trend else '↓ Down' }}</div></div>
-      <div class="market-item"><h2>📅 SPY 5D</h2>
-        <div class="val {{ 'green' if market.spy_5d >= 0 else 'red' }}">
-          {{ '+' if market.spy_5d >= 0 else '' }}{{ market.spy_5d }}%</div></div>
-      <div class="market-item"><h2>📅 QQQ 5D</h2>
-        <div class="val {{ 'green' if market.qqq_5d >= 0 else 'red' }}">
-          {{ '+' if market.qqq_5d >= 0 else '' }}{{ market.qqq_5d }}%</div></div>
-    </div>
-    {% endif %}
-
-    {% if chart_labels %}
-    <div class="chart-wrap">
-      <div class="chart-header">
-        <h2>📈 PORTFOLIO PERFORMANCE</h2>
-      </div>
-      <canvas id="portfolioChart2" height="40"></canvas>
-    </div>
-    {% endif %}
-
-    <h2 class="section-title">🪙 Crypto Signals (Hourly Model)</h2>
-    <table>
-      <tr><th>COIN</th><th>PRICE</th><th>SIGNAL</th><th>CONFIDENCE</th><th>SENTIMENT</th><th>HOLDING</th></tr>
       {% for c in crypto %}
-      <tr>
+      <tr style="background:rgba(255,214,0,0.06)">
         <td><span class="tip"><strong>{{ c.ticker }}</strong><span class="tiptext">{{ c.name }}</span></span></td>
+        <td style="color:#ffd600;font-size:0.8em">🪙 Crypto</td>
         <td>${{ c.price }}</td>
         <td>{% if c.signal == 'BUY' %}<span class="badge buy">▲ BUY</span>
             {% elif c.signal == 'SELL' %}<span class="badge sell">▼ SELL</span>
@@ -674,39 +737,32 @@ HTML = """
         <td>{{ c.coins }} coins</td>
       </tr>
       {% endfor %}
-    </table>
+    </table></div>
 
-    <h2 class="section-title">🪙 Open Crypto Positions</h2>
-    <table>
-      <tr><th>COIN</th><th>QTY</th><th>BOUGHT AT</th><th>CURRENT</th><th>VALUE</th><th>UNREALISED P&L</th></tr>
-      {% for p in crypto_positions_list %}
-      <tr>
-        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
-        <td>{{ p.qty }} coins</td>
-        <td>${{ p.avg_price }}</td>
-        <td>${{ p.current }}</td>
-        <td>${{ p.value }}</td>
-        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">
-          {{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="6" style="padding:20px;text-align:center;color:#888">No open crypto positions</td></tr>
-      {% endfor %}
-    </table>
-
-    <h2 class="section-title">📋 Recent Crypto Orders</h2>
-    <table>
-      <tr><th>TIME</th><th>COIN</th><th>ACTION</th><th>QTY</th><th>PRICE</th></tr>
-      {% for o in crypto_orders %}
-      <tr>
+    <h2 class="section-title">📋 Recent Orders</h2>
+    <div class="table-scroll"><table>
+      <tr><th>TIME</th><th>ASSET</th><th>TYPE</th><th>ACTION</th><th>QTY</th><th>PRICE</th></tr>
+      {% for o in orders %}
+      <tr style="background:rgba(68,138,255,0.07)">
         <td>{{ o.time }}</td>
         <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
+        <td style="color:#448aff;font-size:0.8em">📈 Stock</td>
         <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
             {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
         <td>{{ o.qty }}</td><td>${{ o.price }}</td>
       </tr>
       {% endfor %}
-    </table>
+      {% for o in crypto_orders %}
+      <tr style="background:rgba(255,214,0,0.06)">
+        <td>{{ o.time }}</td>
+        <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
+        <td style="color:#ffd600;font-size:0.8em">🪙 Crypto</td>
+        <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
+            {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
+        <td>{{ o.qty }}</td><td>${{ o.price }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
   </div>
 
   <script>
@@ -717,6 +773,16 @@ HTML = """
     const valCrypto    = {{ chart_crypto_values | safe }};
     const valCash      = {{ chart_cash_values | safe }};
 
+    const chartOptions = {
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#888', maxTicksLimit: 10 }, grid: { color: '#252840' } },
+        y: { ticks: { color: '#888', callback: v => '$' + v.toLocaleString() }, grid: { color: '#252840' } }
+      }
+    };
+
+    const isMobile = window.innerWidth <= 600;
+    const ptRadius = isMobile ? 0 : 2;
     const chart = new Chart(
       document.getElementById('portfolioChart').getContext('2d'), {
       type: 'line',
@@ -725,70 +791,121 @@ HTML = """
         datasets: [
           { label: 'Total ($)',  data: valTotal,  borderColor: '#00c853',
             backgroundColor: 'rgba(0,200,83,0.08)', borderWidth: 2,
-            pointRadius: 2, fill: true, tension: 0.3 },
+            pointRadius: ptRadius, fill: true, tension: 0.3, hidden: false },
           { label: 'Stocks ($)', data: valStocks, borderColor: '#448aff',
             backgroundColor: 'rgba(68,138,255,0.05)', borderWidth: 2,
-            pointRadius: 2, fill: false, tension: 0.3 },
+            pointRadius: ptRadius, fill: false, tension: 0.3, hidden: true },
           { label: 'Crypto ($)', data: valCrypto, borderColor: '#ffd600',
             backgroundColor: 'rgba(255,214,0,0.05)', borderWidth: 2,
-            pointRadius: 2, fill: false, tension: 0.3 },
+            pointRadius: ptRadius, fill: false, tension: 0.3, hidden: true },
           { label: 'Cash ($)', data: valCash, borderColor: '#b0b8d8',
             backgroundColor: 'rgba(176,184,216,0.05)', borderWidth: 2,
-            pointRadius: 2, fill: false, tension: 0.3 }
+            pointRadius: ptRadius, fill: false, tension: 0.3, hidden: true }
         ]
       },
-      options: {
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { ticks: { color: '#888', maxTicksLimit: 10 }, grid: { color: '#252840' } },
-          y: { ticks: { color: '#888', callback: v => '$' + v.toLocaleString() }, grid: { color: '#252840' } }
-        }
-      }
+      options: chartOptions
     });
 
-    const chart2 = new Chart(
-      document.getElementById('portfolioChart2').getContext('2d'), {
-      type: 'line',
-      data: {
-        labels: labels,
-        datasets: [
-          { label: 'Total ($)',  data: valTotal,  borderColor: '#00c853',
-            backgroundColor: 'rgba(0,200,83,0.08)', borderWidth: 2,
-            pointRadius: 2, fill: true, tension: 0.3 },
-          { label: 'Crypto ($)', data: valCrypto, borderColor: '#ffd600',
-            backgroundColor: 'rgba(255,214,0,0.05)', borderWidth: 2,
-            pointRadius: 2, fill: false, tension: 0.3 }
-        ]
-      },
-      options: {
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { ticks: { color: '#888', maxTicksLimit: 10 }, grid: { color: '#252840' } },
-          y: { ticks: { color: '#888', callback: v => '$' + v.toLocaleString() }, grid: { color: '#252840' } }
-        }
-      }
-    });
-
-    function toggleLine(index, el) {
-      const meta = chart.getDatasetMeta(index);
+    function toggleLine(c, index, el) {
+      const meta = c.getDatasetMeta(index);
       meta.hidden = !meta.hidden;
       el.classList.toggle('active');
-      chart.update();
+      c.update();
+    }
+
+    const portfolioViews = {{ chart_views | safe }};
+    function setPortfolioView(view) {
+      const vd = portfolioViews[view];
+      chart.data.labels           = vd.labels;
+      chart.data.datasets[0].data = vd.values;
+      chart.data.datasets[1].data = vd.stock_values;
+      chart.data.datasets[2].data = vd.crypto_values;
+      chart.data.datasets[3].data = vd.cash_values;
+      chart.update('none');
+      ['24h','7d'].forEach(v => {
+        const btn = document.getElementById('pvbtn-' + v);
+        btn.style.background = v === view ? '#2e3250' : 'transparent';
+        btn.style.color      = v === view ? '#fff' : '#888';
+      });
     }
     {% endif %}
 
-    function switchPage(name, el) {
-      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-      document.getElementById('page-' + name).classList.add('active');
-      el.classList.add('active');
+    // Donut allocation charts
+    const allocData = {
+      labels: ['Stocks', 'Crypto', 'Cash'],
+      datasets: [{ data: [{{ stock_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
+        backgroundColor: ['#448aff', '#ffd600', '#00c853'],
+        borderWidth: 0, hoverOffset: 6 }]
+    };
+    const allocOpts = {
+      cutout: '68%',
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: { label: ctx => ctx.label + ': ' + ctx.raw + '%' }
+      }}
+    };
+    new Chart(document.getElementById('allocChart').getContext('2d'),
+      { type: 'doughnut', data: allocData, options: allocOpts });
+
+    // ── Trade countdowns ──
+    const STOCK_HOURS = [14,15,16,17,18,19,20,21];
+    function getUKParts(d) {
+      const fmt = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/London', hour: 'numeric', minute: 'numeric',
+        second: 'numeric', hour12: false, weekday: 'short'
+      });
+      const parts = {};
+      fmt.formatToParts(d).forEach(p => { parts[p.type] = p.value; });
+      const h = parseInt(parts.hour) % 24;
+      return { dow: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(parts.weekday),
+               h, m: parseInt(parts.minute), s: parseInt(parts.second) };
     }
+    function fmtCountdown(s) {
+      if (s <= 0) s = 0;
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sc = s%60;
+      return h > 0 ? h+':'+String(m).padStart(2,'0')+':'+String(sc).padStart(2,'0')
+                   : String(m).padStart(2,'0')+':'+String(sc).padStart(2,'0');
+    }
+    function secsToNextStock(now) {
+      const uk = getUKParts(now);
+      for (let d = 0; d < 8; d++) {
+        if ((uk.dow + d) % 7 === 0 || (uk.dow + d) % 7 === 6) continue;
+        for (const slotH of STOCK_HOURS) {
+          const secs = (slotH - uk.h)*3600 - uk.m*60 - uk.s + d*86400;
+          if (secs > 0) return secs;
+        }
+      }
+      return -1;
+    }
+    function secsToNextCrypto(now) {
+      const uk = getUKParts(now);
+      const nextH = uk.h % 2 === 0 ? uk.h + 2 : uk.h + 1;
+      const secs  = (nextH - uk.h)*3600 - uk.m*60 - uk.s;
+      return secs > 0 ? secs : secs + 7200;
+    }
+    function updateNavCountdowns() {
+      const now = new Date();
+      const sStock  = secsToNextStock(now);
+      const sCrypto = secsToNextCrypto(now);
+      const sEl = document.getElementById('nav-stock-countdown');
+      const cEl = document.getElementById('nav-crypto-countdown');
+      if (sEl) {
+        sEl.textContent = sStock < 0 ? 'CLOSED' : fmtCountdown(sStock);
+        sEl.style.color = sStock < 0 ? '#e74c3c' : sStock < 300 ? '#f0a500' : '#00c853';
+      }
+      if (cEl) {
+        cEl.textContent = fmtCountdown(sCrypto);
+        cEl.style.color = sCrypto < 300 ? '#f0a500' : '#448aff';
+      }
+    }
+    updateNavCountdowns();
+    setInterval(updateNavCountdowns, 1000);
   </script>
 </body>
 </html>
 """
 
 @app.route('/')
+@requires_auth
 def dashboard():
     try:
         account = api.get_account()
@@ -861,7 +978,7 @@ def dashboard():
             feature_row = pd.DataFrame([latest[stock_features]])
             pred        = stock_model.predict(feature_row)[0]
             conf        = stock_model.predict_proba(feature_row)[0][pred]
-            sent_score  = get_sentiment(ticker)
+            sent_score  = get_stock_sentiment_cached(ticker) or 0.0
             signal      = 'BUY' if pred == 1 else 'SELL'
             if conf < 0.60:
                 signal = 'HOLD'
@@ -936,7 +1053,7 @@ def dashboard():
             signal        = 'BUY' if pred == 1 else 'SELL'
             if conf < 0.65:
                 signal = 'HOLD'
-            sent_score  = get_crypto_sentiment(symbol)
+            sent_score  = get_crypto_sentiment_cached(symbol)
             sent_label  = '🟢' if sent_score > 0.05 else '🔴' if sent_score < -0.05 else '⚪'
             if signal == 'BUY' and sent_score < -0.05:
                 signal = 'HOLD'
@@ -979,41 +1096,54 @@ def dashboard():
     } for o in raw_orders if o.symbol in crypto_syms]
 
     # Portfolio history for chart
-    chart_labels        = []
-    chart_values        = []
-    chart_stock_values  = []
-    chart_crypto_values = []
-    chart_cash_values   = []
-    if os.path.exists('/home/jv/portfolio_history.json'):
-        with open('/home/jv/portfolio_history.json') as f:
-            history = json.load(f)
-        chart_labels        = [h['time'] for h in history]
-        chart_values        = [h['value'] for h in history]
-        chart_stock_values  = [h.get('stock_value', 0) for h in history]
-        chart_crypto_values = [h.get('crypto_value', 0) for h in history]
-        chart_cash_values   = [h.get('cash', 0) for h in history]
+    chart_views = build_chart_views()
+    view_7d     = chart_views['7d']
+    chart_labels        = view_7d['labels']
+    chart_values        = view_7d['values']
+    chart_stock_values  = view_7d['stock_values']
+    chart_crypto_values = view_7d['crypto_values']
+    chart_cash_values   = view_7d['cash_values']
 
     # Build positions lists
     stock_positions_list  = []
     crypto_positions_list = []
+    _stock_hw  = json.load(open('/home/jv/stock_highwater.json'))  if os.path.exists('/home/jv/stock_highwater.json')  else {}
+    _crypto_hw = json.load(open('/home/jv/crypto_highwater.json')) if os.path.exists('/home/jv/crypto_highwater.json') else {}
     for p in positions:
+        entry   = float(p.avg_entry_price)
+        current = float(p.current_price)
+        is_stock = p.symbol in TICKERS
+        hw_map   = _stock_hw if is_stock else _crypto_hw
+        stop_pct = 0.12 if is_stock else 0.15
+        peak     = hw_map.get(p.symbol, entry)
+        trail_stop = peak * (1 - stop_pct)
+        gap_pct    = (current - trail_stop) / current * 100
         row = {
-            'symbol':    p.symbol,
-            'name':      COMPANY_NAMES.get(p.symbol, p.symbol),
-            'qty':       int(float(p.qty)) if p.symbol in TICKERS else round(float(p.qty), 6),
-            'avg_price': f"{float(p.avg_entry_price):,.4f}",
-            'current':   f"{float(p.current_price):,.4f}",
-            'value':     f"{float(p.market_value):,.2f}",
-            'pl':        float(p.unrealized_pl),
-            'pl_abs':    f"{abs(float(p.unrealized_pl)):,.2f}",
-            'pl_pct':    f"{float(p.unrealized_plpc)*100:+.2f}",
+            'symbol':     p.symbol,
+            'name':       COMPANY_NAMES.get(p.symbol, p.symbol),
+            'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 6),
+            'avg_price':  f"{entry:,.4f}",
+            'current':    f"{current:,.4f}",
+            'value':      f"{float(p.market_value):,.2f}",
+            'pl':         float(p.unrealized_pl),
+            'pl_abs':     f"{abs(float(p.unrealized_pl)):,.2f}",
+            'pl_pct':     f"{float(p.unrealized_plpc)*100:+.2f}",
+            'trail_stop': f"{trail_stop:,.4f}",
+            'gap_pct':    f"{gap_pct:.1f}",
         }
-        if p.symbol in TICKERS:
+        if is_stock:
             stock_positions_list.append(row)
         else:
             crypto_positions_list.append(row)
 
     crypto_positions_count = len(crypto_positions_list)
+
+    port_val   = float(account.portfolio_value)
+    stock_val  = sum(float(p.market_value) for p in positions if p.symbol in TICKERS)
+    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS)
+    stock_pct  = round(stock_val  / port_val * 100, 1) if port_val else 0.0
+    crypto_pct = round(crypto_val / port_val * 100, 1) if port_val else 0.0
+    cash_pct   = round(100 - stock_pct - crypto_pct, 1)
 
     return render_template_string(HTML,
         cash=cash, portfolio=portfolio, pnl=pnl,
@@ -1026,12 +1156,16 @@ def dashboard():
         chart_stock_values=json.dumps(chart_stock_values),
         chart_crypto_values=json.dumps(chart_crypto_values),
         chart_cash_values=json.dumps(chart_cash_values),
+        chart_views=json.dumps(chart_views),
         stock_model_info=stock_model_info,
         crypto_model_info=crypto_model_info,
         market=market_data,
         crypto_positions=crypto_positions_count,
         stock_positions=stock_positions_list,
-        crypto_positions_list=crypto_positions_list)
+        crypto_positions_list=crypto_positions_list,
+        stock_pct=stock_pct,
+        crypto_pct=crypto_pct,
+        cash_pct=cash_pct)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1199,6 +1333,8 @@ MONITOR_HTML = """
     }
     .ticker-item.held { border-color: var(--border2); background: rgba(255,255,255,0.04); }
     .ticker-sym   { font-family: var(--font-mono); font-weight: 700; color: var(--text); min-width: 50px; }
+    .ticker-sym.stock  { color: var(--blue); }
+    .ticker-sym.crypto { color: var(--gold); }
     .ticker-price { font-family: var(--font-mono); color: var(--muted); font-size: 0.88em; flex: 1; }
     .ticker-right { display: flex; align-items: center; gap: 6px; }
     .ticker-sig   { font-size: 0.85em; font-weight: 900; padding: 3px 9px; border-radius: 4px; letter-spacing: 0.07em; }
@@ -1228,17 +1364,28 @@ MONITOR_HTML = """
     .chart-controls {
       display: flex; align-items: center; gap: 16px;
     }
-    .chart-view-btns {
-      display: flex; gap: 5px;
+    .view-toggle {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .view-toggle-pill {
+      display: flex; background: var(--border2); border-radius: 20px; padding: 2px;
     }
     .view-btn {
       font-family: var(--font-mono); font-size: 0.65em; font-weight: 700;
-      letter-spacing: 0.1em; padding: 3px 10px; border-radius: 4px; cursor: pointer;
+      letter-spacing: 0.1em; padding: 3px 12px; border-radius: 18px; cursor: pointer;
+      border: none; background: transparent; color: var(--muted);
+      transition: all 0.2s;
+    }
+    .view-btn.active { background: #2e3250; color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
+    .view-btn:hover:not(.active) { color: var(--text); }
+    .view-btn-all {
+      font-family: var(--font-mono); font-size: 0.6em; font-weight: 700;
+      letter-spacing: 0.1em; padding: 2px 8px; border-radius: 4px; cursor: pointer;
       border: 1px solid var(--border2); background: transparent; color: var(--muted);
       transition: all 0.15s;
     }
-    .view-btn.active { background: var(--border2); color: var(--text); }
-    .view-btn:hover  { color: var(--text); }
+    .view-btn-all.active { background: var(--border2); color: var(--text); }
+    .view-btn-all:hover  { color: var(--text); }
     .chart-legend {
       display: flex; gap: 16px;
     }
@@ -1493,7 +1640,7 @@ MONITOR_HTML = """
         <div class="ticker-scroll" id="tickerScroll">
           {% for item in all_signals %}
           <div class="ticker-item {{ 'held' if item.held }}">
-            <span class="ticker-sym">{{ item.ticker }}</span>
+            <span class="ticker-sym {{ 'crypto' if item.is_crypto else 'stock' }}">{{ item.ticker }}</span>
             <span class="ticker-price">${{ item.price }}</span>
             <div class="ticker-right">
               <span class="ticker-sig sig-{{ item.action_cls }}">{{ item.action }}</span>
@@ -1503,7 +1650,7 @@ MONITOR_HTML = """
           {# Duplicate for seamless loop #}
           {% for item in all_signals %}
           <div class="ticker-item {{ 'held' if item.held }}">
-            <span class="ticker-sym">{{ item.ticker }}</span>
+            <span class="ticker-sym {{ 'crypto' if item.is_crypto else 'stock' }}">{{ item.ticker }}</span>
             <span class="ticker-price">${{ item.price }}</span>
             <div class="ticker-right">
               <span class="ticker-sig sig-{{ item.action_cls }}">{{ item.action }}</span>
@@ -1521,10 +1668,12 @@ MONITOR_HTML = """
     <div class="chart-header">
       <span class="chart-title">Portfolio Performance</span>
       <div class="chart-controls">
-        <div class="chart-view-btns">
-          <button class="view-btn active" id="vbtn-24h" onclick="setChartView('24h')">24H</button>
-          <button class="view-btn"        id="vbtn-7d"  onclick="setChartView('7d')">7D</button>
-          <button class="view-btn"        id="vbtn-all" onclick="setChartView('all')">ALL</button>
+        <div class="view-toggle">
+          <div class="view-toggle-pill">
+            <button class="view-btn"        id="vbtn-24h" onclick="setChartView('24h')">24H</button>
+            <button class="view-btn active" id="vbtn-7d"  onclick="setChartView('7d')">7D</button>
+          </div>
+          <button class="view-btn-all" id="vbtn-all" onclick="setChartView('all')">ALL</button>
         </div>
         <div class="chart-legend">
           <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>Stocks</div>
@@ -1549,7 +1698,7 @@ MONITOR_HTML = """
       <div class="metric-stats">
         <div class="mstat">
           <span class="mstat-label">Today P&amp;L</span>
-          <span class="mstat-val {{ 'green' if stock_pnl >= 0 else 'red' }}" id="m-stock-pnl">{{ '+' if stock_pnl >= 0 else '' }}${{ '{:,.2f}'.format(stock_pnl) }}</span>
+          <span class="mstat-val {{ 'green' if stock_pnl >= 0 else 'red' }}" id="m-stock-pnl">{{ '+' if stock_pnl >= 0 else '' }}${{ '{:,.2f}'.format(stock_pnl) }} <span id="m-stock-pnl-pct" style="opacity:0.8;font-size:0.9em">({{ '+' if pnl_pct >= 0 else '' }}{{ '{:.2f}'.format(pnl_pct) }}%)</span></span>
         </div>
         <div class="mstat">
           <span class="mstat-label">% of Portfolio</span>
@@ -1570,7 +1719,7 @@ MONITOR_HTML = """
       <div class="metric-stats">
         <div class="mstat">
           <span class="mstat-label">Today P&amp;L</span>
-          <span class="mstat-val {{ 'green' if crypto_pnl >= 0 else 'red' }}" id="m-crypto-pnl">{{ '+' if crypto_pnl >= 0 else '' }}${{ '{:,.2f}'.format(crypto_pnl) }}</span>
+          <span class="mstat-val {{ 'green' if crypto_pnl >= 0 else 'red' }}" id="m-crypto-pnl">{{ '+' if crypto_pnl >= 0 else '' }}${{ '{:,.2f}'.format(crypto_pnl) }} <span id="m-crypto-pnl-pct" style="opacity:0.8;font-size:0.9em">({{ '+' if pnl_pct >= 0 else '' }}{{ '{:.2f}'.format(pnl_pct) }}%)</span></span>
         </div>
         <div class="mstat">
           <span class="mstat-label">% of Portfolio</span>
@@ -1810,10 +1959,10 @@ MONITOR_HTML = """
   {% if chart_views %}
   // Pre-resampled views from server — no date adapter needed, plain category scale
   const CHART_VIEWS = {{ chart_views | safe }};
-  let currentView = '24h';
+  let currentView = '7d';
 
   const ctx = document.getElementById('monChart').getContext('2d');
-  const v0  = CHART_VIEWS['24h'];
+  const v0  = CHART_VIEWS['7d'];
 
   const monChart = new Chart(ctx, {
     type: 'line',
@@ -1877,9 +2026,11 @@ MONITOR_HTML = """
 
   function setChartView(view) {
     currentView = view;
-    ['24h', '7d', 'all'].forEach(v => {
+    ['24h', '7d'].forEach(v => {
       document.getElementById('vbtn-' + v).classList.toggle('active', v === view);
     });
+    const allBtn = document.getElementById('vbtn-all');
+    allBtn.classList.toggle('active', view === 'all');
     const vd = CHART_VIEWS[view];
     monChart.data.labels           = vd.labels;
     monChart.data.datasets[0].data = vd.stock_values;
@@ -1926,8 +2077,12 @@ MONITOR_HTML = """
 
       // Header
       setEl('h-portfolio', '$' + d.portfolio);
-      setEl('h-pnl',        (d.pnl >= 0 ? '+' : '') + '$' + d.pnl_fmt, colourClass(d.pnl));
-      setEl('h-pnl-pct',    '(' + (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)');
+      // h-pnl contains a child <span id="h-pnl-pct"> — must use setElHtml
+      setElHtml('h-pnl',
+        (d.pnl >= 0 ? '+' : '') + '$' + d.pnl_fmt +
+        ' <span id="h-pnl-pct" style="font-size:0.6em;opacity:0.8;letter-spacing:0.02em">(' +
+        (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)</span>',
+        colourClass(d.pnl));
       setEl('h-cash',      '$' + d.cash);
       setEl('h-return',    (d.total_return >= 0 ? '+' : '') + d.total_return + '%', colourClass(d.total_return));
       setEl('h-positions', d.position_count);
@@ -1935,17 +2090,33 @@ MONITOR_HTML = """
       // Metric cards
       setEl('m-stock-val',   '$' + d.stock_value);
       setEl('m-stock-count', d.stock_position_count + ' position' + (d.stock_position_count !== 1 ? 's' : ''));
-      setEl('m-stock-pnl',   (d.stock_pnl >= 0 ? '+' : '') + '$' + d.stock_pnl_fmt, colourClass(d.stock_pnl));
+      setElHtml('m-stock-pnl',
+        (d.stock_pnl >= 0 ? '+' : '') + '$' + d.stock_pnl_fmt +
+        ' <span id="m-stock-pnl-pct" style="opacity:0.8;font-size:0.9em">(' +
+        (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)</span>',
+        colourClass(d.stock_pnl));
       setEl('m-stock-pct',   d.stock_pct + '%');
-      setEl('m-stock-upl',     (d.stock_upl >= 0 ? '+' : '') + '$' + d.stock_upl_fmt, colourClass(d.stock_upl));
-      setEl('m-stock-upl-pct', '(' + (d.stock_upl_pct >= 0 ? '+' : '') + d.stock_upl_pct + '%)');
+      // Use setElHtml for UPL fields — they contain a child <span> for the %,
+      // and setEl(textContent) would destroy that child on every refresh.
+      setElHtml('m-stock-upl',
+        (d.stock_upl >= 0 ? '+' : '') + '$' + d.stock_upl_fmt +
+        ' <span id="m-stock-upl-pct" style="opacity:0.8">(' +
+        (d.stock_upl_pct >= 0 ? '+' : '') + d.stock_upl_pct + '%)</span>',
+        colourClass(d.stock_upl));
 
       setEl('m-crypto-val',    '$' + d.crypto_value);
       setEl('m-crypto-count',  d.crypto_position_count + ' position' + (d.crypto_position_count !== 1 ? 's' : ''));
-      setEl('m-crypto-pnl',    (d.crypto_pnl >= 0 ? '+' : '') + '$' + d.crypto_pnl_fmt, colourClass(d.crypto_pnl));
+      setElHtml('m-crypto-pnl',
+        (d.crypto_pnl >= 0 ? '+' : '') + '$' + d.crypto_pnl_fmt +
+        ' <span id="m-crypto-pnl-pct" style="opacity:0.8;font-size:0.9em">(' +
+        (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)</span>',
+        colourClass(d.crypto_pnl));
       setEl('m-crypto-pct',    d.crypto_pct + '%');
-      setEl('m-crypto-upl',    (d.crypto_upl >= 0 ? '+' : '') + '$' + d.crypto_upl_fmt, colourClass(d.crypto_upl));
-      setEl('m-crypto-upl-pct','(' + (d.crypto_upl_pct >= 0 ? '+' : '') + d.crypto_upl_pct + '%)');
+      setElHtml('m-crypto-upl',
+        (d.crypto_upl >= 0 ? '+' : '') + '$' + d.crypto_upl_fmt +
+        ' <span id="m-crypto-upl-pct" style="opacity:0.8">(' +
+        (d.crypto_upl_pct >= 0 ? '+' : '') + d.crypto_upl_pct + '%)</span>',
+        colourClass(d.crypto_upl));
 
       // Recent trades
       if (d.recent_trades) {
@@ -1972,7 +2143,7 @@ MONITOR_HTML = """
       if (tickerEl) {
         const rows = d.signals.map(s =>
           `<div class="ticker-item${s.held ? ' held' : ''}">
-            <span class="ticker-sym">${s.ticker}</span>
+            <span class="ticker-sym ${s.is_crypto ? 'crypto' : 'stock'}">${s.ticker}</span>
             <span class="ticker-price">$${s.price}</span>
             <div class="ticker-right">
               <span class="ticker-sig sig-${s.action_cls}">${s.action}</span>
@@ -2004,14 +2175,12 @@ MONITOR_HTML = """
       rebuildBelt('belt-pl',  plChips);
       rebuildBelt('belt-pos', posChips);
 
-      // Chart — replace view data if a new snapshot arrived
+      // Chart — always merge fresh view data from the server so that
+      // switching to 7D or ALL after an AJAX tick shows current data.
+      // We only re-render the active view to avoid a visible flash.
       if (typeof monChart !== 'undefined' && d.chart_views) {
-        const newLast = (d.chart_views['24h'].labels || []).slice(-1)[0];
-        const curLast = (CHART_VIEWS['24h'].labels || []).slice(-1)[0];
-        if (newLast !== curLast) {
-          Object.assign(CHART_VIEWS, d.chart_views);
-          setChartView(currentView);
-        }
+        Object.assign(CHART_VIEWS, d.chart_views);
+        setChartView(currentView);
       }
       setEl('updated-time', d.updated);
     } catch(e) {
@@ -2028,6 +2197,7 @@ MONITOR_HTML = """
 
 
 @app.route('/monitor')
+@requires_auth
 def monitor():
     try:
         account = api.get_account()
@@ -2107,27 +2277,45 @@ def monitor():
         except Exception:
             return ''
 
+    stock_hw  = json.load(open('/home/jv/stock_highwater.json'))  if os.path.exists('/home/jv/stock_highwater.json')  else {}
+    crypto_hw = json.load(open('/home/jv/crypto_highwater.json')) if os.path.exists('/home/jv/crypto_highwater.json') else {}
+
+    STOCK_STOP  = 0.12
+    CRYPTO_STOP = 0.15
+
     for p in positions:
         if p.symbol in TICKERS:
             yf_sym   = p.symbol
             interval = '5m'
             period   = '1d'
+            hw_map   = stock_hw
+            stop_pct = STOCK_STOP
         else:
             yf_sym   = p.symbol[:-3] + '-USD' if p.symbol.endswith('USD') else p.symbol
             interval = '15m'
             period   = '1d'
+            hw_map   = crypto_hw
+            stop_pct = CRYPTO_STOP
+
+        entry   = float(p.avg_entry_price)
+        current = float(p.current_price)
+        peak    = hw_map.get(p.symbol, entry)
+        trail_stop = peak * (1 - stop_pct)
+        gap_pct    = (current - trail_stop) / current * 100
 
         row = {
-            'symbol':    p.symbol,
-            'name':      COMPANY_NAMES.get(p.symbol, p.symbol),
-            'qty':       int(float(p.qty)) if p.symbol in TICKERS else round(float(p.qty), 4),
-            'avg_price': f"{float(p.avg_entry_price):,.2f}",
-            'current':   f"{float(p.current_price):,.2f}",
-            'value':     f"{float(p.market_value):,.0f}",
-            'pl':        float(p.unrealized_pl),
-            'pl_abs':    f"{abs(float(p.unrealized_pl)):,.2f}",
-            'pl_pct':    f"{float(p.unrealized_plpc)*100:+.1f}",
-            'spark':     build_sparkline(yf_sym, interval=interval, period=period),
+            'symbol':      p.symbol,
+            'name':        COMPANY_NAMES.get(p.symbol, p.symbol),
+            'qty':         int(float(p.qty)) if p.symbol in TICKERS else round(float(p.qty), 4),
+            'avg_price':   f"{entry:,.2f}",
+            'current':     f"{current:,.2f}",
+            'value':       f"{float(p.market_value):,.0f}",
+            'pl':          float(p.unrealized_pl),
+            'pl_abs':      f"{abs(float(p.unrealized_pl)):,.2f}",
+            'pl_pct':      f"{float(p.unrealized_plpc)*100:+.1f}",
+            'trail_stop':  f"{trail_stop:,.2f}",
+            'gap_pct':     f"{gap_pct:.1f}",
+            'spark':       build_sparkline(yf_sym, interval=interval, period=period),
         }
         if p.symbol in TICKERS:
             stock_positions_list.append(row)
@@ -2142,6 +2330,7 @@ def monitor():
     total_invested = stock_value + crypto_value
     stock_pct  = round(stock_value  / port_val * 100, 1) if port_val else 0.0
     crypto_pct = round(crypto_value / port_val * 100, 1) if port_val else 0.0
+    cash_pct   = round(100 - stock_pct - crypto_pct, 1)
     stock_cost  = stock_value  - stock_upl
     crypto_cost = crypto_value - crypto_upl
     stock_upl_pct  = round(stock_upl  / stock_cost  * 100, 2) if stock_cost  else 0.0
@@ -2232,7 +2421,7 @@ def monitor():
             price = f"{float(p.current_price):,.2f}" if p else "—"
         all_signals.append({
             'ticker': ticker, 'price': price, 'signal': sig,
-            'held': bool(p), 'raw_score': raw_score,
+            'held': bool(p), 'raw_score': raw_score, 'is_crypto': False,
         })
 
     # ── Crypto signals: ML inference ──
@@ -2296,7 +2485,7 @@ def monitor():
             price = f"{float(p.current_price):,.4f}" if p else "—"
         all_signals.append({
             'ticker': symbol.replace('/USD', ''), 'price': price, 'signal': sig,
-            'held': bool(p), 'raw_score': raw_score,
+            'held': bool(p), 'raw_score': raw_score, 'is_crypto': True,
         })
 
     # ── Filter to actionable only, then attach action label ──
@@ -2336,6 +2525,7 @@ def monitor():
         crypto_pnl=crypto_pnl,
         stock_pct=stock_pct,
         crypto_pct=crypto_pct,
+        cash_pct=cash_pct,
         stock_upl=stock_upl,
         stock_upl_pct=stock_upl_pct,
         crypto_upl=crypto_upl,
@@ -2362,6 +2552,7 @@ def monitor():
 from flask import jsonify
 
 @app.route('/monitor/data')
+@requires_auth
 def monitor_data():
     try:
         account = api.get_account()
@@ -2411,20 +2602,32 @@ def monitor_data():
     crypto_positions_list = []
     stock_value  = 0.0
     crypto_value = 0.0
+    _shw = json.load(open('/home/jv/stock_highwater.json'))  if os.path.exists('/home/jv/stock_highwater.json')  else {}
+    _chw = json.load(open('/home/jv/crypto_highwater.json')) if os.path.exists('/home/jv/crypto_highwater.json') else {}
     for p in positions:
+        is_stock = p.symbol in TICKERS
+        entry    = float(p.avg_entry_price)
+        current  = float(p.current_price)
+        hw_map   = _shw if is_stock else _chw
+        stop_pct = 0.12 if is_stock else 0.15
+        peak     = hw_map.get(p.symbol, entry)
+        trail_stop = peak * (1 - stop_pct)
+        gap_pct    = (current - trail_stop) / current * 100
         row = {
-            'sym':       p.symbol.replace('/USD', '').replace('USD', ''),
-            'symbol':    p.symbol,
-            'qty':       int(float(p.qty)) if p.symbol in TICKERS else round(float(p.qty), 4),
-            'avg_price': f"{float(p.avg_entry_price):,.2f}",
-            'current':   f"{float(p.current_price):,.2f}",
-            'value':     f"{float(p.market_value):,.0f}",
-            'pl':        float(p.unrealized_pl),
-            'pl_abs':    f"{abs(float(p.unrealized_pl)):,.2f}",
-            'pl_pct':    f"{float(p.unrealized_plpc)*100:+.1f}",
-            'is_stock':  p.symbol in TICKERS,
+            'sym':        p.symbol.replace('/USD', '').replace('USD', ''),
+            'symbol':     p.symbol,
+            'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 4),
+            'avg_price':  f"{entry:,.2f}",
+            'current':    f"{current:,.2f}",
+            'value':      f"{float(p.market_value):,.0f}",
+            'pl':         float(p.unrealized_pl),
+            'pl_abs':     f"{abs(float(p.unrealized_pl)):,.2f}",
+            'pl_pct':     f"{float(p.unrealized_plpc)*100:+.1f}",
+            'is_stock':   is_stock,
+            'trail_stop': f"{trail_stop:,.2f}",
+            'gap_pct':    f"{gap_pct:.1f}",
         }
-        if p.symbol in TICKERS:
+        if is_stock:
             stock_positions_list.append(row)
             stock_value += float(p.market_value)
         else:
@@ -2438,6 +2641,7 @@ def monitor_data():
     total_inv  = stock_value + crypto_value
     stock_pct  = round(stock_value  / port_val * 100, 1) if port_val else 0.0
     crypto_pct = round(crypto_value / port_val * 100, 1) if port_val else 0.0
+    cash_pct   = round(100 - stock_pct - crypto_pct, 1)
     stock_cost  = stock_value  - stock_upl
     crypto_cost = crypto_value - crypto_upl
     stock_upl_pct  = round(stock_upl  / stock_cost  * 100, 2) if stock_cost  else 0.0
@@ -2468,7 +2672,7 @@ def monitor_data():
         entry     = stock_sent_cache.get(ticker)
         raw_score = entry['score'] if entry else None
         _signals_raw.append({'ticker': ticker, 'price': price, 'signal': sig,
-                             'held': bool(p), 'raw_score': raw_score})
+                             'held': bool(p), 'raw_score': raw_score, 'is_crypto': False})
     for symbol in CRYPTOS:
         alpaca_sym = symbol.replace('/', '')
         p     = pos_dict.get(alpaca_sym)
@@ -2479,7 +2683,7 @@ def monitor_data():
             sig = 'BUY' if chg > 0.01 else ('SELL' if chg < -0.02 else 'HOLD')
         raw_score = get_crypto_sentiment_cached(symbol)
         _signals_raw.append({'ticker': symbol.replace('/USD', ''), 'price': price, 'signal': sig,
-                             'held': bool(p), 'raw_score': raw_score})
+                             'held': bool(p), 'raw_score': raw_score, 'is_crypto': True})
 
     # Filter: open positions always shown; unpositioned only if BUY + positive sentiment
     signals = [s for s in _signals_raw
@@ -2511,12 +2715,13 @@ def monitor_data():
         stock_pnl            = stock_pnl,
         stock_pnl_fmt        = f"{abs(stock_pnl):,.2f}",
         stock_pct            = stock_pct,
+        crypto_pct           = crypto_pct,
+        cash_pct             = cash_pct,
         stock_upl            = stock_upl,
         stock_upl_fmt        = f"{abs(stock_upl):,.2f}",
         stock_upl_pct        = stock_upl_pct,
         crypto_pnl           = crypto_pnl,
         crypto_pnl_fmt       = f"{abs(crypto_pnl):,.2f}",
-        crypto_pct           = crypto_pct,
         crypto_upl           = crypto_upl,
         crypto_upl_fmt       = f"{abs(crypto_upl):,.2f}",
         crypto_upl_pct       = crypto_upl_pct,
@@ -2535,5 +2740,3 @@ def monitor_data():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
-    
-    

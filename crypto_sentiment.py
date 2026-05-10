@@ -3,14 +3,33 @@ import json
 import time
 import requests
 import yfinance as yf
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from transformers import pipeline
 
+_finbert = None
 
+def get_finbert():
+    global _finbert
+    if _finbert is None:
+        _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
+                            tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
+    return _finbert
 
+def score_headlines(headlines):
+    """Run FinBERT on a list of headline strings, return compound score -1..+1."""
+    if not headlines:
+        return 0.0
+    results = get_finbert()(headlines, truncation=True, max_length=512, batch_size=8)
+    scores = []
+    for r in results:
+        if r['label'] == 'positive':
+            scores.append(r['score'])
+        elif r['label'] == 'negative':
+            scores.append(-r['score'])
+        else:
+            scores.append(0.0)
+    return round(sum(scores) / len(scores), 3)
 
-
-analyzer   = SentimentIntensityAnalyzer()
 CACHE_FILE = '/home/jv/crypto_sentiment_cache.json'
 CACHE_TTL  = 1800  # 30 minutes
 
@@ -71,9 +90,8 @@ def fetch_via_cryptopanic(currency):
         results = r.json().get('results', [])
         if not results:
             return 0.0
-        scores = [analyzer.polarity_scores(p.get('title',''))['compound']
-                  for p in results[:10] if p.get('title')]
-        return round(sum(scores) / len(scores), 3) if scores else 0.0
+        headlines = [p.get('title', '') for p in results[:10] if p.get('title')]
+        return score_headlines(headlines)
     except:
         return None
 
@@ -86,17 +104,17 @@ def fetch_via_yahoo(symbol):
         news      = ticker.news
         if not news:
             return 0.0
-        scores = []
+        headlines = []
         for item in news[:10]:
             title = item.get('content', {}).get('title', '') or item.get('title', '')
             if title:
-                scores.append(analyzer.polarity_scores(title)['compound'])
-        return round(sum(scores) / len(scores), 3) if scores else 0.0
+                headlines.append(title)
+        return score_headlines(headlines)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_fetch)
         try:
-            return future.result(timeout=30)
+            return future.result(timeout=60)
         except (FuturesTimeoutError, Exception):
             return 0.0
 
@@ -109,9 +127,9 @@ def refresh_all_sentiment():
         score = fetch_via_cryptopanic(currency)
         if score is None:
             score = fetch_via_yahoo(symbol)
-            source = 'Yahoo'
+            source = 'Yahoo+FinBERT'
         else:
-            source = 'CryptoPanic'
+            source = 'CryptoPanic+FinBERT'
             time.sleep(2)
 
         cache[symbol] = {'score': score, 'fetched': now}

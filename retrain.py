@@ -28,10 +28,43 @@ def p(msg):
     print(msg)
     log.info(msg)
 
+def make_exit_label(df, take_profit, stop_loss, max_bars):
+    """
+    For each bar, simulate holding a long position and look forward up to max_bars.
+    Uses High/Low so intraday touches count.
+    Returns 1 if take-profit is hit before stop-loss, 0 otherwise.
+    Last max_bars rows are NaN (insufficient lookahead) and should be dropped.
+    """
+    close = df['Close'].values
+    high  = df['High'].values
+    low   = df['Low'].values
+    n     = len(close)
+
+    tp_bar = np.full(n, max_bars + 1, dtype=float)
+    sl_bar = np.full(n, max_bars + 1, dtype=float)
+    tp_prices = close * (1 + take_profit)
+    sl_prices = close * (1 - stop_loss)
+
+    # Iterate from furthest lag to nearest so the smallest (first) hit overwrites
+    for lag in range(max_bars, 0, -1):
+        idx = np.arange(n - lag)
+        tp_bar[idx[high[idx + lag] >= tp_prices[idx]]] = lag
+        sl_bar[idx[low[idx + lag]  <= sl_prices[idx]]] = lag
+
+    labels = np.where(tp_bar < sl_bar, 1.0, 0.0)
+    labels[n - max_bars:] = np.nan
+    return pd.Series(labels, index=df.index)
+
 STOCK_TICKERS = [
-    'AAPL','GOOGL','MSFT','META','AMZN','TSLA','NVDA',
-    'JPM','BAC','GS','PFE','MRK','RIVN','NIO',
-    'WMT','TGT','AMD','QCOM','MS'
+    'AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD',  # Tech
+    'NVDA','AMD','QCOM','ARM',                            # Semiconductors
+    'TSLA','SHOP','COIN',                                 # Growth
+    'JPM','BAC','GS','MS',                               # Finance
+    'TGT',                                                # Retail
+    'OXY',                                                # Energy
+    'GOLD',                                               # Commodities
+    'UNH','ISRG',                                         # Healthcare
+    'CAT',                                                # Industrials
 ]
 
 CRYPTOS = {
@@ -48,17 +81,21 @@ CRYPTOS = {
 }
 
 SECTORS = {
-    'Tech':    ['AAPL','GOOGL','MSFT','META','AMZN','NVDA','AMD','QCOM'],
-    'EV':      ['TSLA','RIVN','NIO'],
-    'Finance': ['JPM','BAC','GS','MS'],
-    'Pharma':  ['PFE','MRK'],
-    'Retail':  ['WMT','TGT'],
+    'Tech':       ['AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD'],
+    'Semi':       ['NVDA','AMD','QCOM','ARM'],
+    'Growth':     ['TSLA','SHOP','COIN'],
+    'Finance':    ['JPM','BAC','GS','MS'],
+    'Retail':     ['TGT'],
+    'Energy':     ['OXY'],
+    'Commodities':['GOLD'],
+    'Healthcare': ['UNH','ISRG'],
+    'Industrial': ['CAT'],
 }
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
 STOCK_FEATURES = [
     'SMA_10','SMA_30','SMA_50','EMA_12','EMA_26','MACD','RSI',
-    'Return','Return_5d','Return_10d','Volatility','High_Low',
+    'Return','Return_5d','Return_10d','Return_20d','Volatility','High_Low',
     'BB_position','BB_width','Vol_Ratio','Vol_Spike','DayOfWeek',
     'Sector_Momentum','Sector_Momentum_5d',
     'VIX','SPY_Return','SPY_Trend','SPY_Return_5d',
@@ -72,7 +109,7 @@ STOCK_FEATURES = [
 CRYPTO_FEATURES = [
     'SMA_24','SMA_72','SMA_168',
     'EMA_12','EMA_26','MACD','RSI',
-    'Return','Return_24h','Return_72h',
+    'Return','Return_24h','Return_72h','Return_168h',
     'Volatility',
     'BB_position','BB_width',
     'Vol_Ratio','Vol_Spike',
@@ -94,6 +131,7 @@ def build_base_features(df):
     df['Return']       = df['Close'].pct_change()
     df['Return_5d']    = df['Close'].pct_change(5)
     df['Return_10d']   = df['Close'].pct_change(10)
+    df['Return_20d']   = df['Close'].pct_change(20)
     df['Volatility']   = df['Return'].rolling(10).std()
     df['High_Low']     = (df['High'] - df['Low']) / df['Close']
     bb_mid             = df['Close'].rolling(20).mean()
@@ -179,11 +217,12 @@ def retrain_stocks():
             df = yf.download(ticker, period="15y", interval="1d", progress=False)
             df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
             df = build_base_features(df)
-            future_max   = df['Close'].rolling(3).max().shift(-3)
-            df['Target'] = (future_max > df['Close'] * 1.01).astype(int)
+            df['Target'] = make_exit_label(df, take_profit=0.20, stop_loss=0.12, max_bars=60)
             df.dropna(inplace=True)
+            df['Target'] = df['Target'].astype(int)
+            buy_rate = df['Target'].mean()
             all_data[ticker] = df
-            p(f"  {ticker}: {len(df):,} rows")
+            p(f"  {ticker}: {len(df):,} rows  (TP-first rate: {buy_rate:.1%})")
         except Exception as e:
             p(f"  {ticker}: ERROR — {e}")
 
@@ -215,7 +254,10 @@ def retrain_stocks():
     combined = pd.concat(all_data.values())
     X = combined[STOCK_FEATURES]
     y = combined['Target'].squeeze()
+    buy_rate = float(y.mean())
+    spw = (1 - buy_rate) / buy_rate
     p(f"✅ Combined: {len(combined):,} rows, {X.shape[1]} features")
+    p(f"   TP-first rate: {buy_rate:.1%}  →  scale_pos_weight: {spw:.2f}")
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, shuffle=False)
@@ -224,13 +266,15 @@ def retrain_stocks():
     model = xgb.XGBClassifier(
         n_estimators=500, max_depth=6, learning_rate=0.05,
         subsample=0.8, colsample_bytree=0.8,
+        scale_pos_weight=spw,
         random_state=42, n_jobs=-1,
-        eval_metric='logloss', verbosity=0
+        eval_metric='logloss', verbosity=0,
+        early_stopping_rounds=50,
     )
     model.fit(X_train, y_train,
               eval_set=[(X_test, y_test)], verbose=False)
     acc = accuracy_score(y_test, model.predict(X_test))
-    p(f"✅ Stock accuracy: {acc:.1%}")
+    p(f"✅ Stock accuracy: {acc:.1%} (best iteration: {model.best_iteration})")
 
     joblib.dump(model, '/home/jv/trading_model.joblib')
     with open('/home/jv/features.json', 'w') as f:
@@ -243,6 +287,7 @@ def retrain_stocks():
             'features':      len(STOCK_FEATURES),
             'training_rows': len(X_train),
             'tickers':       STOCK_TICKERS,
+            'target':        'exit-simulation: TP +8% before SL -5% within 20 days',
         }, f)
 
     elapsed = time.time() - start
@@ -275,6 +320,7 @@ def retrain_crypto():
             df['Return']      = df['Close'].pct_change()
             df['Return_24h']  = df['Close'].pct_change(24)
             df['Return_72h']  = df['Close'].pct_change(72)
+            df['Return_168h'] = df['Close'].pct_change(168)
             df['Volatility']  = df['Return'].rolling(24).std()
             bb_mid            = df['Close'].rolling(48).mean()
             bb_std            = df['Close'].rolling(48).std()
@@ -285,14 +331,14 @@ def retrain_crypto():
             df['Volume_MA']   = df['Volume'].rolling(24).mean()
             df['Vol_Ratio']   = df['Volume'] / df['Volume_MA']
             df['Vol_Spike']   = (df['Vol_Ratio'] > 2.0).astype(int)
-            # Target: +0.5% within 6h (was 1% — more achievable in recovering markets)
-            future_max        = df['Close'].rolling(6).max().shift(-6)
-            df['Target']      = (future_max > df['Close'] * 1.005).astype(int)
-            df.dropna(inplace=True)
             df.index = pd.to_datetime(df.index).tz_convert('UTC')
+            # Target: exit-simulation — TP +25% before SL -15% within ~30 days (720h)
+            df['Target'] = make_exit_label(df, take_profit=0.25, stop_loss=0.15, max_bars=720)
+            df.dropna(inplace=True)
+            df['Target'] = df['Target'].astype(int)
             buy_rate = df['Target'].mean()
             crypto_data[symbol] = df
-            p(f"  {symbol}: {len(df):,} rows  (BUY rate: {buy_rate:.1%})")
+            p(f"  {symbol}: {len(df):,} rows  (TP-first rate: {buy_rate:.1%})")
         except Exception as e:
             p(f"  {symbol}: ERROR — {e}")
 
@@ -374,7 +420,8 @@ def retrain_crypto():
         subsample=0.8, colsample_bytree=0.8,
         scale_pos_weight=spw,                # class balance fix
         random_state=42, n_jobs=-1,
-        eval_metric='logloss', verbosity=0
+        eval_metric='logloss', verbosity=0,
+        early_stopping_rounds=50,
     )
     model.fit(X_train, y_train,
               eval_set=[(X_test, y_test)], verbose=False)
@@ -382,7 +429,7 @@ def retrain_crypto():
     acc = accuracy_score(y_test, model.predict(X_test))
     preds_test = model.predict(X_test)
     buy_preds  = preds_test.mean()
-    p(f"✅ Crypto accuracy: {acc:.1%}")
+    p(f"✅ Crypto accuracy: {acc:.1%} (best iteration: {model.best_iteration})")
     p(f"   BUY predictions on test set: {buy_preds:.1%}  (was ~2% before fix)")
 
     joblib.dump(model, '/home/jv/crypto_model.joblib')
@@ -397,7 +444,7 @@ def retrain_crypto():
             'training_rows': len(X_train),
             'coins':         list(CRYPTOS.keys()),
             'interval':      '1h',
-            'target':        '+0.5% in 6h',
+            'target':        'exit-simulation: TP +10% before SL -8% within 120h',
             'buy_rate':      f"{buy_rate:.1%}",
         }, f)
 
