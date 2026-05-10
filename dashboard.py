@@ -743,20 +743,10 @@ HTML = """
     <div class="table-scroll"><table>
       <tr><th>TIME</th><th>ASSET</th><th>TYPE</th><th>ACTION</th><th>QTY</th><th>PRICE</th></tr>
       {% for o in orders %}
-      <tr style="background:rgba(68,138,255,0.07)">
+      <tr style="background:{{ 'rgba(255,214,0,0.06)' if o.is_crypto else 'rgba(68,138,255,0.07)' }}">
         <td>{{ o.time }}</td>
         <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
-        <td style="color:#448aff;font-size:0.8em">📈 Stock</td>
-        <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
-            {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
-        <td>{{ o.qty }}</td><td>${{ o.price }}</td>
-      </tr>
-      {% endfor %}
-      {% for o in crypto_orders %}
-      <tr style="background:rgba(255,214,0,0.06)">
-        <td>{{ o.time }}</td>
-        <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
-        <td style="color:#ffd600;font-size:0.8em">🪙 Crypto</td>
+        <td style="color:{{ '#ffd600' if o.is_crypto else '#448aff' }};font-size:0.8em">{{ '🪙 Crypto' if o.is_crypto else '📈 Stock' }}</td>
         <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
             {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
         <td>{{ o.qty }}</td><td>${{ o.price }}</td>
@@ -773,6 +763,46 @@ HTML = """
     const valCrypto    = {{ chart_crypto_values | safe }};
     const valCash      = {{ chart_cash_values | safe }};
 
+    // Shade non-trading periods (outside Mon-Fri 14:30-21:00 UK time)
+    const tradingHoursPlugin = {
+      id: 'tradingHoursShading',
+      beforeDraw(chart) {
+        const { ctx, chartArea, scales } = chart;
+        const xScale = scales.x;
+        const lbls = chart.data.labels;
+        if (!lbls || !lbls.length) return;
+        const year = new Date().getFullYear();
+        function isTrading(label) {
+          const [datePart, timePart] = label.split(' ');
+          const [day, month] = datePart.split('/').map(Number);
+          const [hour, minute] = timePart.split(':').map(Number);
+          const date = new Date(year, month - 1, day, hour, minute);
+          const dow = date.getDay();
+          if (dow === 0 || dow === 6) return false;
+          const mins = hour * 60 + minute;
+          return mins >= 14 * 60 + 30 && mins < 21 * 60;
+        }
+        ctx.save();
+        let tradingStart = null;
+        lbls.forEach((label, i) => {
+          const trading = isTrading(label);
+          const x = xScale.getPixelForValue(i);
+          if (trading && tradingStart === null) {
+            tradingStart = x;
+          } else if (!trading && tradingStart !== null) {
+            ctx.fillStyle = 'rgba(68, 138, 255, 0.12)';
+            ctx.fillRect(tradingStart, chartArea.top, x - tradingStart, chartArea.bottom - chartArea.top);
+            tradingStart = null;
+          }
+        });
+        if (tradingStart !== null) {
+          ctx.fillStyle = 'rgba(68, 138, 255, 0.12)';
+          ctx.fillRect(tradingStart, chartArea.top, chartArea.right - tradingStart, chartArea.bottom - chartArea.top);
+        }
+        ctx.restore();
+      }
+    };
+
     const chartOptions = {
       plugins: { legend: { display: false } },
       scales: {
@@ -786,6 +816,7 @@ HTML = """
     const chart = new Chart(
       document.getElementById('portfolioChart').getContext('2d'), {
       type: 'line',
+      plugins: [tradingHoursPlugin],
       data: {
         labels: labels,
         datasets: [
@@ -1078,22 +1109,21 @@ def dashboard():
                 'confidence': '—', 'sentiment': '—', 'coins': '—'
             })
 
-    raw_orders    = api.list_orders(status='all', limit=20)
-    crypto_syms   = list(CRYPTOS.keys())
-    orders        = [{
-        'time':   o.submitted_at.strftime('%m/%d %H:%M') if o.submitted_at else '—',
+    raw_orders  = api.list_orders(status='all', limit=40)
+    crypto_syms = list(CRYPTOS.keys())
+    all_orders  = sorted(
+        [o for o in raw_orders if o.symbol in TICKERS or o.symbol in crypto_syms],
+        key=lambda o: o.submitted_at or datetime.min, reverse=True
+    )[:20]
+    orders = [{
+        'time':   o.submitted_at.strftime('%d/%m %H:%M') if o.submitted_at else '—',
         'symbol': o.symbol,
         'name':   COMPANY_NAMES.get(o.symbol, o.symbol),
         'side':   o.side, 'qty': o.qty,
-        'price':  o.filled_avg_price or '—'
-    } for o in raw_orders if o.symbol in TICKERS]
-    crypto_orders = [{
-        'time':   o.submitted_at.strftime('%m/%d %H:%M') if o.submitted_at else '—',
-        'symbol': o.symbol,
-        'name':   COMPANY_NAMES.get(o.symbol, o.symbol),
-        'side':   o.side, 'qty': o.qty,
-        'price':  o.filled_avg_price or '—'
-    } for o in raw_orders if o.symbol in crypto_syms]
+        'price':  o.filled_avg_price or '—',
+        'is_crypto': o.symbol in crypto_syms,
+    } for o in all_orders]
+    crypto_orders = []
 
     # Portfolio history for chart
     chart_views = build_chart_views()
@@ -2242,7 +2272,7 @@ def monitor():
         sym = o.symbol.replace('/USD', '').replace('USD', '')
         ts  = o.filled_at or o.submitted_at
         recent_trades.append({
-            'time':   ts.strftime('%m/%d %H:%M') if ts else '—',
+            'time':   ts.strftime('%d/%m %H:%M') if ts else '—',
             'symbol': sym,
             'side':   o.side.upper(),
             'qty':    o.filled_qty or o.qty,
@@ -2590,7 +2620,7 @@ def monitor_data():
         sym = o.symbol.replace('/USD', '').replace('USD', '')
         ts  = o.filled_at or o.submitted_at
         recent_trades.append({
-            'time':   ts.strftime('%m/%d %H:%M') if ts else '—',
+            'time':   ts.strftime('%d/%m %H:%M') if ts else '—',
             'symbol': sym,
             'side':   o.side.upper(),
             'qty':    o.filled_qty or o.qty,
