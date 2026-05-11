@@ -10,6 +10,8 @@ import pandas as pd
 import yfinance as yf
 import alpaca_trade_api as tradeapi
 from datetime import datetime
+from newsapi import NewsApiClient
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 print("=" * 50)
 print(f"📈 Stock Trader — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -155,6 +157,26 @@ def get_sector_momentum(ticker, all_returns):
     mom    = sum(all_returns[t]['latest'] for t in available) / len(available)
     mom_5d = sum(all_returns[t]['5d'] for t in available) / len(available)
     return mom, mom_5d
+
+_vader = SentimentIntensityAnalyzer()
+_newsapi = None
+
+def get_sentiment(ticker):
+    global _newsapi
+    if _newsapi is None:
+        _newsapi = NewsApiClient(api_key=ENV['NEWS_KEY'])
+    try:
+        resp = _newsapi.get_everything(q=ticker, language='en', page_size=10, sort_by='publishedAt')
+        articles = resp.get('articles', [])
+        if not articles:
+            return 0.0
+        scores = []
+        for a in articles:
+            text = ' '.join(filter(None, [a.get('title', ''), a.get('description', '')]))
+            scores.append(_vader.polarity_scores(text)['compound'])
+        return sum(scores) / len(scores)
+    except Exception:
+        return 0.0
 
 def log_signal(symbol, signal, confidence, sentiment, price, acted, reason):
     log_file = '/home/jv/performance.json'
