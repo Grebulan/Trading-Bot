@@ -7,23 +7,78 @@ import pandas as pd
 import yfinance as yf
 import alpaca_trade_api as tradeapi
 from datetime import datetime
-from flask import Flask, render_template_string, request, Response
+from flask import Flask, render_template_string, request, Response, session, redirect, url_for
 import functools
+import secrets
 from sentiment import get_sentiment  # used only in background refresh thread
 
 
 app = Flask(__name__)
+def _load_secret_key():
+    try:
+        with open(os.path.expanduser('~/.env_trading')) as f:
+            for line in f:
+                if line.startswith('DASHBOARD_SECRET_KEY='):
+                    return line.strip().split('=', 1)[1]
+    except Exception:
+        pass
+    return secrets.token_hex(32)
 
-DASHBOARD_USER     = 'jv'
+app.secret_key = _load_secret_key()
+
 DASHBOARD_PASSWORD = 'negril'
+SESSION_DAYS = 30
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trading Bot — Login</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0c14; color: #e0e6ff;
+           font-family: -apple-system, 'Segoe UI', sans-serif;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; }
+    .card { background: #111420; border: 1px solid #1e2540;
+            border-radius: 12px; padding: 36px 32px; width: 320px; }
+    h1 { font-size: 1.1em; font-weight: 700; margin-bottom: 24px;
+         color: #e0e6ff; text-align: center; }
+    h1 span { color: #448aff; }
+    input[type=password] {
+      width: 100%; padding: 10px 14px; border-radius: 7px;
+      background: #0d1022; border: 1px solid #2a2d4a;
+      color: #e0e6ff; font-size: 1em; margin-bottom: 16px; outline: none;
+    }
+    input[type=password]:focus { border-color: #448aff; }
+    button {
+      width: 100%; padding: 11px; border-radius: 7px;
+      background: #448aff; border: none; color: #fff;
+      font-size: 1em; font-weight: 700; cursor: pointer;
+    }
+    button:hover { background: #5a9fff; }
+    .err { color: #ff5252; font-size: 0.82em; margin-bottom: 12px; text-align: center; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>📈 <span>Trading</span> Bot</h1>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="password" name="password" placeholder="Password" autofocus>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>"""
+
 
 def requires_auth(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or auth.username != DASHBOARD_USER or auth.password != DASHBOARD_PASSWORD:
-            return Response('Authorisation required', 401,
-                            {'WWW-Authenticate': 'Basic realm="Trading Dashboard"'})
+        if not session.get('authed'):
+            return redirect(url_for('login', next=request.path))
         return f(*args, **kwargs)
     return decorated
 
@@ -553,9 +608,10 @@ HTML = """
 
   <!-- STICKY TOP NAV -->
   <div class="topnav">
-    <div>
+    <div style="display:flex;align-items:center;gap:16px">
       <span class="topnav h1">🤖 Trading Bot</span>
       <span class="subtitle">Updated: {{ updated }} &bull; auto-refresh 5min</span>
+      <a href="/milestones" style="padding:4px 12px;border-radius:6px;background:#1a1d2e;border:1px solid #2a2d4a;color:#888;font-size:0.78em;font-weight:bold;text-decoration:none" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#888'">📍 Milestones</a>
     </div>
     <div class="nav-header-right" style="display:flex;align-items:center;gap:20px">
       <span class="nav-countdown" style="font-size:0.78em;color:#888">
@@ -617,6 +673,7 @@ HTML = """
           <canvas id="allocChart" width="100" height="100"></canvas>
           <div class="alloc-legend">
             <span style="color:#448aff">■</span> Stocks {{ stock_pct }}%<br>
+            <span style="color:#c084fc">■</span> SPY {{ spy_pct }}%<br>
             <span style="color:#ffd600">■</span> Crypto {{ crypto_pct }}%<br>
             <span style="color:#00c853">■</span> Cash {{ cash_pct }}%
           </div>
@@ -675,6 +732,19 @@ HTML = """
     <div class="table-scroll"><table>
       <tr><th>ASSET</th><th>TYPE</th><th>QTY</th><th>BOUGHT AT</th><th>CURRENT</th><th>VALUE</th><th>UNREALISED P&L</th><th>TRAIL STOP</th><th>GAP</th></tr>
       {% for p in stock_positions %}
+      {% if p.is_spy %}
+      <tr style="background:rgba(100,181,246,0.10)">
+        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
+        <td style="color:#64b5f6;font-size:0.8em">🏦 SPY Default</td>
+        <td>{{ p.qty }} sh</td>
+        <td>${{ p.avg_price }}</td>
+        <td>${{ p.current }}</td>
+        <td>${{ p.value }}</td>
+        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
+        <td style="color:#f0a500">${{ p.trail_stop }} <span style="color:#555;font-size:0.8em">(5%)</span></td>
+        <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
+      </tr>
+      {% else %}
       <tr style="background:rgba(68,138,255,0.07)">
         <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
         <td style="color:#448aff;font-size:0.8em">📈 Stock</td>
@@ -686,6 +756,7 @@ HTML = """
         <td style="color:#f0a500">${{ p.trail_stop }}</td>
         <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
       </tr>
+      {% endif %}
       {% endfor %}
       {% for p in crypto_positions_list %}
       <tr style="background:rgba(255,214,0,0.06)">
@@ -743,10 +814,10 @@ HTML = """
     <div class="table-scroll"><table>
       <tr><th>TIME</th><th>ASSET</th><th>TYPE</th><th>ACTION</th><th>QTY</th><th>PRICE</th></tr>
       {% for o in orders %}
-      <tr style="background:{{ 'rgba(255,214,0,0.06)' if o.is_crypto else 'rgba(68,138,255,0.07)' }}">
+      <tr style="background:{{ 'rgba(255,214,0,0.06)' if o.is_crypto else ('rgba(100,181,246,0.10)' if o.symbol == 'SPY' else 'rgba(68,138,255,0.07)') }}">
         <td>{{ o.time }}</td>
         <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
-        <td style="color:{{ '#ffd600' if o.is_crypto else '#448aff' }};font-size:0.8em">{{ '🪙 Crypto' if o.is_crypto else '📈 Stock' }}</td>
+        <td style="color:{{ '#ffd600' if o.is_crypto else ('#64b5f6' if o.symbol == 'SPY' else '#448aff') }};font-size:0.8em">{{ '🪙 Crypto' if o.is_crypto else ('🏦 SPY Default' if o.symbol == 'SPY' else '📈 Stock') }}</td>
         <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
             {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
         <td>{{ o.qty }}</td><td>${{ o.price }}</td>
@@ -863,9 +934,9 @@ HTML = """
 
     // Donut allocation charts
     const allocData = {
-      labels: ['Stocks', 'Crypto', 'Cash'],
-      datasets: [{ data: [{{ stock_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
-        backgroundColor: ['#448aff', '#ffd600', '#00c853'],
+      labels: ['Stocks', 'SPY Default', 'Crypto', 'Cash'],
+      datasets: [{ data: [{{ stock_pct }}, {{ spy_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
+        backgroundColor: ['#448aff', '#c084fc', '#ffd600', '#00c853'],
         borderWidth: 0, hoverOffset: 6 }]
     };
     const allocOpts = {
@@ -934,6 +1005,28 @@ HTML = """
 </body>
 </html>
 """
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    from datetime import timedelta
+    next_url = request.args.get('next', '/')
+    if request.method == 'POST':
+        if request.form.get('password') == DASHBOARD_PASSWORD:
+            session.permanent = True
+            app.permanent_session_lifetime = timedelta(days=SESSION_DAYS)
+            session['authed'] = True
+            return redirect(next_url)
+        return render_template_string(LOGIN_HTML, error='Incorrect password')
+    if session.get('authed'):
+        return redirect(next_url)
+    return render_template_string(LOGIN_HTML, error=None)
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
 
 @app.route('/')
 @requires_auth
@@ -1112,7 +1205,7 @@ def dashboard():
     raw_orders  = api.list_orders(status='all', limit=40)
     crypto_syms = list(CRYPTOS.keys())
     all_orders  = sorted(
-        [o for o in raw_orders if o.symbol in TICKERS or o.symbol in crypto_syms],
+        [o for o in raw_orders if o.symbol in TICKERS or o.symbol in crypto_syms or o.symbol == 'SPY'],
         key=lambda o: o.submitted_at or datetime.min, reverse=True
     )[:20]
     orders = [{
@@ -1140,17 +1233,17 @@ def dashboard():
     _stock_hw  = json.load(open('/home/jv/stock_highwater.json'))  if os.path.exists('/home/jv/stock_highwater.json')  else {}
     _crypto_hw = json.load(open('/home/jv/crypto_highwater.json')) if os.path.exists('/home/jv/crypto_highwater.json') else {}
     for p in positions:
-        entry   = float(p.avg_entry_price)
-        current = float(p.current_price)
-        is_stock = p.symbol in TICKERS
+        entry    = float(p.avg_entry_price)
+        current  = float(p.current_price)
+        is_stock = p.symbol in TICKERS or p.symbol == 'SPY'
         hw_map   = _stock_hw if is_stock else _crypto_hw
-        stop_pct = 0.12 if is_stock else 0.15
+        stop_pct = 0.05 if p.symbol == 'SPY' else (0.12 if is_stock else 0.15)
         peak     = hw_map.get(p.symbol, entry)
         trail_stop = peak * (1 - stop_pct)
         gap_pct    = (current - trail_stop) / current * 100
         row = {
             'symbol':     p.symbol,
-            'name':       COMPANY_NAMES.get(p.symbol, p.symbol),
+            'name':       'S&P 500 ETF (default)' if p.symbol == 'SPY' else COMPANY_NAMES.get(p.symbol, p.symbol),
             'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 6),
             'avg_price':  f"{entry:,.4f}",
             'current':    f"{current:,.4f}",
@@ -1160,6 +1253,8 @@ def dashboard():
             'pl_pct':     f"{float(p.unrealized_plpc)*100:+.2f}",
             'trail_stop': f"{trail_stop:,.4f}",
             'gap_pct':    f"{gap_pct:.1f}",
+            'is_stock':   is_stock,
+            'is_spy':     p.symbol == 'SPY',
         }
         if is_stock:
             stock_positions_list.append(row)
@@ -1169,11 +1264,14 @@ def dashboard():
     crypto_positions_count = len(crypto_positions_list)
 
     port_val   = float(account.portfolio_value)
+    spy_val    = sum(float(p.market_value) for p in positions if p.symbol == 'SPY')
     stock_val  = sum(float(p.market_value) for p in positions if p.symbol in TICKERS)
-    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS)
+    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS and p.symbol != 'SPY')
+    cash_val   = port_val - spy_val - stock_val - crypto_val
+    spy_pct    = round(spy_val    / port_val * 100, 1) if port_val else 0.0
     stock_pct  = round(stock_val  / port_val * 100, 1) if port_val else 0.0
     crypto_pct = round(crypto_val / port_val * 100, 1) if port_val else 0.0
-    cash_pct   = round(100 - stock_pct - crypto_pct, 1)
+    cash_pct   = round(cash_val   / port_val * 100, 1) if port_val else 0.0
 
     return render_template_string(HTML,
         cash=cash, portfolio=portfolio, pnl=pnl,
@@ -1193,1578 +1291,298 @@ def dashboard():
         crypto_positions=crypto_positions_count,
         stock_positions=stock_positions_list,
         crypto_positions_list=crypto_positions_list,
+        spy_pct=spy_pct,
         stock_pct=stock_pct,
         crypto_pct=crypto_pct,
         cash_pct=cash_pct)
 
 
-# ─────────────────────────────────────────────────────────────
-#  MONITOR PAGE  –  fullscreen display for the Pi's monitor
-#  Visit http://localhost:5000/monitor
-#  Designed to fill a 1080p/1440p landscape screen, no scrolling.
-#  Auto-refreshes every 60 seconds.
-# ─────────────────────────────────────────────────────────────
-
-MONITOR_HTML = """
+MILESTONES_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Trading Bot — Monitor</title>
-  <meta name="viewport" content="width=1920">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+  <title>Trading Bot — Milestones</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
   <style>
-    :root {
-      --bg:        #04060e;
-      --panel:     #0b0e1c;
-      --border:    #1e2540;
-      --border2:   #2d3660;
-      --text:      #e8eeff;
-      --muted:     #8b96c0;
-      --dim:       #5a6490;
-      --green:     #00f07a;
-      --red:       #ff4d6a;
-      --gold:      #ffd740;
-      --blue:      #5dccff;
-      --purple:    #c9b5ff;
-      --font-mono: 'Share Tech Mono', monospace;
-      --font-ui:   'Barlow Condensed', sans-serif;
-      font-size:   17px;
-    }
-
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0c14; color: #e0e6ff;
+      font-family: -apple-system, 'Segoe UI', sans-serif;
+      padding: 24px 20px; min-height: 100vh;
+    }
+    a { color: #448aff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
 
-    html, body {
-      width: 100%; height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--font-ui);
-      overflow: hidden;
+    .page-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 28px; flex-wrap: wrap; gap: 12px;
     }
+    .page-title { font-size: 1.4em; font-weight: 700; color: #e0e6ff; }
+    .page-title span { color: #448aff; }
+    .back-btn {
+      padding: 7px 16px; border-radius: 7px; background: #1a1d2e;
+      border: 1px solid #2a2d4a; color: #aaa; font-size: 0.85em;
+      font-weight: 600; cursor: pointer;
+    }
+    .back-btn:hover { color: #fff; border-color: #448aff; }
 
-    /* ── Layout ── */
-    .grid {
-      display: grid;
-      grid-template-columns: 280px 1fr 300px;
-      grid-template-rows: 64px 1fr 1fr 120px;
-      grid-template-areas:
-        "header  header  header"
-        "sidebar chart   metrics"
-        "sidebar chart   metrics"
-        "footer  footer  footer";
-      gap: 8px;
-      padding: 8px;
-      width: 100vw;
-      height: 100vh;
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px; margin-bottom: 28px;
     }
+    .summary-card {
+      background: #111420; border: 1px solid #1e2540;
+      border-radius: 10px; padding: 16px 18px;
+    }
+    .summary-card .label { font-size: 0.72em; color: #666; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+    .summary-card .value { font-size: 1.35em; font-weight: 700; }
+    .green { color: #00c853; } .red { color: #ff1744; }
+    .blue  { color: #448aff; } .gold { color: #ffd600; }
+    .purple { color: #c084fc; }
 
-    /* ── Header ── */
-    .header {
-      grid-area: header;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: var(--panel);
-      border: 1px solid var(--border2);
-      border-radius: 6px;
-      padding: 0 20px;
+    .chart-card {
+      background: #111420; border: 1px solid #1e2540;
+      border-radius: 10px; padding: 20px; margin-bottom: 28px;
     }
-    .header-left {
-      display: flex; align-items: center; gap: 18px;
-    }
-    .header-logo {
-      font-family: var(--font-mono);
-      font-size: 1.05em;
-      color: var(--blue);
-      letter-spacing: 0.04em;
-    }
-    .header-logo span { color: var(--dim); }
-    .header-clock {
-      font-family: var(--font-mono);
-      font-size: 1.55em;
-      color: var(--text);
-      letter-spacing: 0.06em;
-    }
-    .header-right {
-      display: flex; align-items: center; gap: 26px;
-    }
-    .hstat { text-align: right; }
-    .hstat-label { font-size: 0.68em; color: var(--muted); letter-spacing: 0.12em; text-transform: uppercase; }
-    .hstat-val   { font-size: 1.25em; font-weight: 700; letter-spacing: 0.02em; }
-    .hstat-val--hero { font-size: 1.75em; font-weight: 900; letter-spacing: 0.01em; }
-    .divider { width: 1px; height: 32px; background: var(--border2); }
-    .status-dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: var(--green);
-      box-shadow: 0 0 10px var(--green);
-      animation: pulse 2s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%,100% { opacity: 1; } 50% { opacity: 0.35; }
-    }
+    .chart-card h2 { font-size: 0.85em; color: #666; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 16px; }
 
-    /* ── Sidebar ── */
-    .sidebar {
-      grid-area: sidebar;
-      display: flex; flex-direction: column; gap: 8px;
+    .milestones-list { display: flex; flex-direction: column; gap: 16px; }
+    .milestone-card {
+      background: #111420; border: 1px solid #1e2540;
+      border-radius: 10px; padding: 18px 20px;
     }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 12px 14px;
+    .milestone-header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      flex-wrap: wrap; gap: 8px; margin-bottom: 14px;
+      padding-bottom: 12px; border-bottom: 1px solid #1e2540;
     }
-    .panel-title {
-      font-size: 0.7em; font-weight: 700;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 10px;
-      padding-bottom: 7px;
-      border-bottom: 1px solid var(--border2);
-    }
+    .milestone-date { font-size: 1em; font-weight: 700; color: #448aff; }
+    .milestone-val  { font-size: 1.25em; font-weight: 700; }
+    .milestone-ret  { font-size: 0.85em; font-weight: 700; margin-left: 10px; }
+    .milestone-notes { font-size: 0.78em; color: #555; margin-top: 4px; }
 
-    /* Market indicators */
-    .mkt-row {
-      display: flex; justify-content: space-between; align-items: baseline;
-      padding: 7px 0;
-      border-bottom: 1px solid var(--border);
-      font-size: 0.92em;
+    .positions-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 8px; margin-bottom: 10px;
     }
-    .mkt-row:last-child { border-bottom: none; }
-    .mkt-label { color: var(--muted); font-size: 0.82em; letter-spacing: 0.07em; font-weight: 600; }
-    .mkt-val { font-family: var(--font-mono); font-weight: 700; font-size: 1.05em; }
+    .pos-chip {
+      background: #0d1022; border: 1px solid #1e2540; border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .pos-sym  { font-size: 0.8em; font-weight: 700; color: #e0e6ff; }
+    .pos-sym.spy { color: #c084fc; }
+    .pos-val  { font-size: 0.78em; color: #666; margin-top: 2px; }
+    .pos-pl   { font-size: 0.78em; font-weight: 600; margin-top: 1px; }
 
-    /* Ticker tape */
-    .ticker-panel {
-      overflow: hidden;
-      flex: 1;
-      display: flex; flex-direction: column;
+    .model-row {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      font-size: 0.78em; color: #555; margin-top: 10px;
+      padding-top: 10px; border-top: 1px solid #1e2540;
     }
-    .ticker-scroll-wrap { overflow: hidden; flex: 1; position: relative; }
-    .ticker-scroll {
-      display: flex; flex-direction: column; gap: 2px;
-      animation: tickerScroll 60s linear infinite;
-    }
-    .ticker-scroll:hover { animation-play-state: paused; }
-    @keyframes tickerScroll {
-      0%   { transform: translateY(0); }
-      100% { transform: translateY(-50%); }
-    }
-    .ticker-item {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 6px 8px;
-      border-radius: 5px;
-      font-size: 0.95em;
-      border: 1px solid transparent;
-      gap: 4px;
-    }
-    .ticker-item.held { border-color: var(--border2); background: rgba(255,255,255,0.04); }
-    .ticker-sym   { font-family: var(--font-mono); font-weight: 700; color: var(--text); min-width: 50px; }
-    .ticker-sym.stock  { color: var(--blue); }
-    .ticker-sym.crypto { color: var(--gold); }
-    .ticker-price { font-family: var(--font-mono); color: var(--muted); font-size: 0.88em; flex: 1; }
-    .ticker-right { display: flex; align-items: center; gap: 6px; }
-    .ticker-sig   { font-size: 0.85em; font-weight: 900; padding: 3px 9px; border-radius: 4px; letter-spacing: 0.07em; }
-    .sig-open    { color: #040e1a; background: var(--blue); }
-    .sig-buymore { color: #0a1a10; background: var(--green); }
-    .sig-hold    { color: #1a1400; background: var(--gold); }
-    .sig-sell    { color: #1a040a; background: var(--red); }
-    .dim { color: var(--dim); }
+    .model-row span { color: #888; }
+    .model-row strong { color: #aaa; }
 
-    /* ── Chart area ── */
-    .chart-area {
-      grid-area: chart;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 14px 16px;
-      display: flex; flex-direction: column;
-    }
-    .chart-header {
-      display: flex; justify-content: space-between; align-items: center;
-      margin-bottom: 10px;
-    }
-    .chart-title {
-      font-size: 0.72em; font-weight: 700; letter-spacing: 0.14em;
-      text-transform: uppercase; color: var(--muted);
-    }
-    .chart-controls {
-      display: flex; align-items: center; gap: 16px;
-    }
-    .view-toggle {
-      display: flex; align-items: center; gap: 10px;
-    }
-    .view-toggle-pill {
-      display: flex; background: var(--border2); border-radius: 20px; padding: 2px;
-    }
-    .view-btn {
-      font-family: var(--font-mono); font-size: 0.65em; font-weight: 700;
-      letter-spacing: 0.1em; padding: 3px 12px; border-radius: 18px; cursor: pointer;
-      border: none; background: transparent; color: var(--muted);
-      transition: all 0.2s;
-    }
-    .view-btn.active { background: #2e3250; color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
-    .view-btn:hover:not(.active) { color: var(--text); }
-    .view-btn-all {
-      font-family: var(--font-mono); font-size: 0.6em; font-weight: 700;
-      letter-spacing: 0.1em; padding: 2px 8px; border-radius: 4px; cursor: pointer;
-      border: 1px solid var(--border2); background: transparent; color: var(--muted);
-      transition: all 0.15s;
-    }
-    .view-btn-all.active { background: var(--border2); color: var(--text); }
-    .view-btn-all:hover  { color: var(--text); }
-    .chart-legend {
-      display: flex; gap: 16px;
-    }
-    .legend-item {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 0.82em; color: var(--muted); font-weight: 600;
-    }
-    .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
-    .chart-canvas-wrap { flex: 1; position: relative; min-height: 0; }
-
-    /* ── Metrics — right column, 4 cards stacked ── */
-    .metrics {
-      grid-area: metrics;
-      display: flex; flex-direction: column; gap: 8px;
-    }
-    .metric-card {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 7px 11px;
-      display: flex; flex-direction: column;
-      flex: 1;
-    }
-    .metric-label {
-      font-size: 0.7em; font-weight: 700; letter-spacing: 0.13em;
-      text-transform: uppercase; color: var(--muted);
-      margin-bottom: 2px;
-    }
-    .metric-val {
-      font-family: var(--font-mono);
-      font-size: 1.25em;
-      font-weight: 600;
-      line-height: 1;
-    }
-    .metric-sub {
-      font-size: 0.72em; color: var(--muted); margin-top: 1px;
-    }
-    /* Dense stat rows inside metric cards */
-    .metric-stats {
-      display: flex; flex-direction: column; gap: 3px;
-      margin-top: 5px; padding-top: 5px;
-      border-top: 1px solid var(--border);
-      flex: 1;
-    }
-    .mstat {
-      display: flex; justify-content: space-between; align-items: baseline;
-      font-size: 0.75em;
-    }
-    .mstat-label { color: var(--muted); font-weight: 600; }
-    .mstat-val   { font-family: var(--font-mono); color: var(--text); font-weight: 700; }
-
-    /* ── Recent Trades card ── */
-    .trades-card  { flex: 3; min-height: 0; display: flex; flex-direction: column; }
-    .trades-wrap  {
-      overflow: hidden; flex: 1; margin-top: 6px; padding-top: 6px;
-      border-top: 1px solid var(--border); min-height: 0;
-      display: flex; flex-direction: column; gap: 4px;
-    }
-    .trade-row {
-      display: grid; grid-template-columns: 5.5em 3.2em 3.2em 1fr auto;
-      gap: 5px; align-items: baseline;
-      font-size: 0.76em; font-family: var(--font-mono);
-    }
-    .trade-time  { color: var(--muted); }
-    .trade-sym   { font-weight: 700; color: var(--text); }
-    .trade-side.buy  { color: var(--green); font-weight: 700; }
-    .trade-side.sell { color: var(--red);   font-weight: 700; }
-    .trade-qty   { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .trade-price { color: var(--text); text-align: right; }
-    .trade-empty { color: var(--muted); font-size: 0.8em; font-style: italic; margin-top: 6px; }
-
-
-    /* ── Footer — 3-row scrolling position ticker ── */
-    .footer {
-      grid-area: footer;
-      background: var(--panel);
-      border: 1px solid var(--border2);
-      border-radius: 6px;
-      display: flex; align-items: stretch;
-      overflow: hidden;
-    }
-    .footer-label {
-      flex-shrink: 0; padding: 0 14px;
-      font-size: 0.65em; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--muted); border-right: 1px solid var(--border2);
-      white-space: nowrap; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 6px;
-    }
-    .footer-label-dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--green); box-shadow: 0 0 8px var(--green);
-      animation: pulse 2s ease-in-out infinite;
-    }
-    /* Three stacked rows, each scrolling independently */
-    .footer-rows {
-      flex: 1; overflow: hidden;
-      display: flex; flex-direction: column;
-    }
-    .footer-row {
-      flex: 1; overflow: hidden;
-      display: flex; align-items: center;
-      border-bottom: 1px solid var(--border);
-    }
-    .footer-row:last-child { border-bottom: none; }
-    .footer-row-label {
-      flex-shrink: 0; width: 64px; padding: 0 10px;
-      font-size: 0.6em; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-      color: var(--dim); border-right: 1px solid var(--border);
-      height: 100%; display: flex; align-items: center; justify-content: flex-end;
-    }
-    .ft-track { overflow: hidden; flex: 1; height: 100%; display: flex; align-items: center; }
-    .ft-belt {
-      display: flex; align-items: center; white-space: nowrap;
-      animation: footerScroll 60s linear infinite;
-    }
-    .ft-belt.paused { animation-play-state: paused; }
-    @keyframes footerScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
-
-    /* Each position chip — three rows show different data for the same position */
-    .ft-chip {
-      display: inline-flex; align-items: center;
-      padding: 0 20px; border-right: 1px solid var(--border);
-      min-width: 120px;
-    }
-    /* Row 1: symbol (large) */
-    .ft-chip-sym {
-      font-family: var(--font-mono); font-weight: 800;
-      font-size: 1.05em; color: var(--text); letter-spacing: 0.05em;
-    }
-    /* Row 2: current price + P&L */
-    .ft-chip-price { font-family: var(--font-mono); font-size: 0.88em; color: var(--muted); font-weight: 600; margin-right: 10px; }
-    .ft-chip-pl    { font-family: var(--font-mono); font-size: 0.88em; font-weight: 800; }
-    .ft-chip-pct   { font-family: var(--font-mono); font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-left: 4px; }
-    /* Row 3: qty, avg, value */
-    .ft-chip-meta  { font-family: var(--font-mono); font-size: 0.8em; color: var(--muted); font-weight: 600; }
-    .ft-chip-val   { font-family: var(--font-mono); font-size: 0.8em; color: var(--text); font-weight: 700; margin-left: 8px; }
-
-    .footer-meta {
-      flex-shrink: 0; padding: 0 14px;
-      font-size: 0.6em; font-weight: 600; letter-spacing: 0.1em;
-      color: var(--dim); border-left: 1px solid var(--border2);
-      white-space: nowrap; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 4px;
-    }
-
-    /* Colour utils */
-    .green  { color: var(--green); }
-    .red    { color: var(--red); }
-    .gold   { color: var(--gold); }
-    .blue   { color: var(--blue); }
-    .purple { color: var(--purple); }
-    .vix-ok   { color: var(--green); }
-    .vix-warn { color: var(--gold); }
-    .vix-bad  { color: var(--red); }
+    .empty { text-align: center; color: #555; padding: 60px 20px; font-size: 0.9em; }
   </style>
 </head>
 <body>
-<div class="grid">
 
-  <!-- ══ HEADER ══ -->
-  <header class="header">
-    <div class="header-left">
-      <div class="status-dot"></div>
-      <div class="header-logo">ALGO<span>/</span>TRADER <span style="font-size:0.7em;color:var(--muted)">PAPER</span></div>
-      <div class="header-clock" id="clock">--:--:--</div>
+<div class="page-header">
+  <div class="page-title">📍 <span>Milestone</span> History</div>
+  <a href="/"><button class="back-btn">← Dashboard</button></a>
+</div>
+
+{% if milestones %}
+
+<div class="summary-grid">
+  <div class="summary-card">
+    <div class="label">Started</div>
+    <div class="value">$100,000.00</div>
+  </div>
+  <div class="summary-card">
+    <div class="label">Latest Portfolio</div>
+    <div class="value blue">${{ latest.portfolio_value | format_money }}</div>
+  </div>
+  <div class="summary-card">
+    <div class="label">Total Return</div>
+    <div class="value {{ 'green' if latest.total_return_pct >= 0 else 'red' }}">
+      {{ '+' if latest.total_return_pct >= 0 else '' }}{{ latest.total_return_pct }}%
     </div>
-    <div class="header-right">
-      <div class="hstat">
-        <div class="hstat-label">Portfolio</div>
-        <div class="hstat-val hstat-val--hero blue" id="h-portfolio">${{ portfolio }}</div>
+  </div>
+  <div class="summary-card">
+    <div class="label">Milestones Recorded</div>
+    <div class="value">{{ milestones | length }}</div>
+  </div>
+  <div class="summary-card">
+    <div class="label">First Recorded</div>
+    <div class="value" style="font-size:1em">{{ milestones[0].date }}</div>
+  </div>
+  <div class="summary-card">
+    <div class="label">Latest Model</div>
+    <div class="value blue" style="font-size:1em">
+      {{ latest.model.stock_accuracy }} stocks
+    </div>
+  </div>
+  <div class="summary-card">
+    <div class="label">Sharpe Ratio</div>
+    {% if sharpe is not none %}
+    <div class="value {{ 'green' if sharpe >= 1.0 else ('gold' if sharpe >= 0.5 else 'red') }}">
+      {{ sharpe }}
+      <span style="font-size:0.55em;color:#555;font-weight:400">
+        {{ '★ good' if sharpe >= 1.0 else ('ok' if sharpe >= 0.5 else 'poor') }}
+      </span>
+    </div>
+    {% else %}
+    <div class="value" style="color:#555;font-size:0.9em">need ≥3 weeks</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="chart-card">
+  <h2>Portfolio Value Over Time</h2>
+  <canvas id="milestoneChart" height="80"></canvas>
+</div>
+
+<div class="milestones-list">
+  {% for m in milestones | reverse %}
+  <div class="milestone-card">
+    <div class="milestone-header">
+      <div>
+        <span class="milestone-date">{{ m.date }}{% if m.time %} · {{ m.time }}{% endif %}</span>
+        {% if m.notes is defined and m.notes %}
+        <div class="milestone-notes">{{ m.notes | join(' &bull; ') }}</div>
+        {% endif %}
       </div>
-      <div class="divider"></div>
-      <div class="hstat">
-        <div class="hstat-label">Today P&amp;L</div>
-        <div class="hstat-val hstat-val--hero {{ 'green' if pnl >= 0 else 'red' }}" id="h-pnl">
-          {{ '+' if pnl >= 0 else '' }}${{ '{:,.2f}'.format(pnl) }}
-          <span id="h-pnl-pct" style="font-size:0.6em;opacity:0.8;letter-spacing:0.02em">({{ '+' if pnl_pct >= 0 else '' }}{{ '{:.2f}'.format(pnl_pct) }}%)</span>
-        </div>
-      </div>
-      <div class="divider"></div>
-      <div class="hstat">
-        <div class="hstat-label">Total Return</div>
-        <div class="hstat-val hstat-val--hero {{ 'green' if total_return >= 0 else 'red' }}" id="h-return">
-          {{ '+' if total_return >= 0 else '' }}{{ '{:.2f}'.format(total_return) }}%
-        </div>
-      </div>
-      <div class="divider"></div>
-      <div class="hstat">
-        <div class="hstat-label">Cash</div>
-        <div class="hstat-val" id="h-cash">${{ cash }}</div>
-      </div>
-      <div class="divider"></div>
-      <div class="hstat">
-        <div class="hstat-label">Positions</div>
-        <div class="hstat-val gold" id="h-positions">{{ position_count }}</div>
-      </div>
-      <div class="divider"></div>
-      <div class="hstat">
-        <div class="hstat-label">Next Stock Trade</div>
-        <div class="hstat-val" id="h-stock-countdown" style="font-size:1em;letter-spacing:0.04em">--:--:--</div>
-      </div>
-      <div class="divider"></div>
-      <div class="hstat">
-        <div class="hstat-label">Next Crypto Trade</div>
-        <div class="hstat-val blue" id="h-crypto-countdown" style="font-size:1em;letter-spacing:0.04em">--:--:--</div>
+      <div>
+        <span class="milestone-val">${{ m.portfolio_value | format_money }}</span>
+        <span class="milestone-ret {{ 'green' if m.total_return_pct >= 0 else 'red' }}">
+          {{ '+' if m.total_return_pct >= 0 else '' }}{{ m.total_return_pct }}%
+        </span>
       </div>
     </div>
-  </header>
 
-  <!-- ══ SIDEBAR ══ -->
-  <aside class="sidebar">
+    <div class="positions-grid">
+      {% for p in m.positions %}
+      <div class="pos-chip">
+        <div class="pos-sym {{ 'spy' if p.symbol == 'SPY' else '' }}">{{ p.symbol }}</div>
+        <div class="pos-val">${{ p.value | format_money }}</div>
+        <div class="pos-pl {{ 'green' if p.pl_pct >= 0 else 'red' }}">{{ '+' if p.pl_pct >= 0 else '' }}{{ p.pl_pct }}%</div>
+      </div>
+      {% endfor %}
+    </div>
 
-    <!-- Market indicators -->
-    <div class="panel">
-      <div class="panel-title">Market Overview</div>
-      {% if market %}
-      <div class="mkt-row">
-        <span class="mkt-label">VIX</span>
-        <span class="mkt-val {% if market.vix < 20 %}vix-ok{% elif market.vix < 30 %}vix-warn{% else %}vix-bad{% endif %}">
-          {{ market.vix }}
-        </span>
-      </div>
-      <div class="mkt-row">
-        <span class="mkt-label">S&amp;P 500</span>
-        <span class="mkt-val {{ 'green' if market.spy_trend else 'red' }}">
-          {{ '↑ BULL' if market.spy_trend else '↓ BEAR' }}
-          <span style="font-size:0.8em;color:var(--muted)">({{ '+' if market.spy_5d >= 0 else '' }}{{ market.spy_5d }}%)</span>
-        </span>
-      </div>
-      <div class="mkt-row">
-        <span class="mkt-label">NASDAQ</span>
-        <span class="mkt-val {{ 'green' if market.qqq_trend else 'red' }}">
-          {{ '↑ BULL' if market.qqq_trend else '↓ BEAR' }}
-          <span style="font-size:0.8em;color:var(--muted)">({{ '+' if market.qqq_5d >= 0 else '' }}{{ market.qqq_5d }}%)</span>
-        </span>
-      </div>
-      <div class="mkt-row">
-        <span class="mkt-label">BTC Trend</span>
-        <span class="mkt-val {{ 'green' if market.btc_trend else 'red' }}">
-          {{ '↑ UP' if market.btc_trend else '↓ DOWN' }}
-        </span>
-      </div>
-      {% else %}
-      <div style="color:var(--muted);font-size:0.8em;padding:8px 0">Market data unavailable</div>
+    {% if m.model is defined %}
+    <div class="model-row">
+      <span>Model accuracy —</span>
+      <span><strong>Stocks:</strong> {{ m.model.stock_accuracy }}</span>
+      <span><strong>Crypto:</strong> {{ m.model.crypto_accuracy }}</span>
+      <span><strong>Trained:</strong> {{ m.model.trained_at }}</span>
+      {% if m.sharpe is defined and m.sharpe is not none %}
+      <span><strong>Sharpe:</strong>
+        <span class="{{ 'green' if m.sharpe >= 1.0 else ('gold' if m.sharpe >= 0.5 else 'red') }}">{{ m.sharpe }}</span>
+      </span>
       {% endif %}
     </div>
-
-    <!-- Scrolling ticker of actionable signals -->
-    <div class="panel ticker-panel">
-      <div class="panel-title">Next Trade Action</div>
-      <div class="ticker-scroll-wrap">
-        <div class="ticker-scroll" id="tickerScroll">
-          {% for item in all_signals %}
-          <div class="ticker-item {{ 'held' if item.held }}">
-            <span class="ticker-sym {{ 'crypto' if item.is_crypto else 'stock' }}">{{ item.ticker }}</span>
-            <span class="ticker-price">${{ item.price }}</span>
-            <div class="ticker-right">
-              <span class="ticker-sig sig-{{ item.action_cls }}">{{ item.action }}</span>
-            </div>
-          </div>
-          {% endfor %}
-          {# Duplicate for seamless loop #}
-          {% for item in all_signals %}
-          <div class="ticker-item {{ 'held' if item.held }}">
-            <span class="ticker-sym {{ 'crypto' if item.is_crypto else 'stock' }}">{{ item.ticker }}</span>
-            <span class="ticker-price">${{ item.price }}</span>
-            <div class="ticker-right">
-              <span class="ticker-sig sig-{{ item.action_cls }}">{{ item.action }}</span>
-            </div>
-          </div>
-          {% endfor %}
-        </div>
-      </div>
-    </div>
-
-  </aside>
-
-  <!-- ══ CHART ══ -->
-  <section class="chart-area">
-    <div class="chart-header">
-      <span class="chart-title">Portfolio Performance</span>
-      <div class="chart-controls">
-        <div class="view-toggle">
-          <div class="view-toggle-pill">
-            <button class="view-btn"        id="vbtn-24h" onclick="setChartView('24h')">24H</button>
-            <button class="view-btn active" id="vbtn-7d"  onclick="setChartView('7d')">7D</button>
-          </div>
-          <button class="view-btn-all" id="vbtn-all" onclick="setChartView('all')">ALL</button>
-        </div>
-        <div class="chart-legend">
-          <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>Stocks</div>
-          <div class="legend-item"><div class="legend-dot" style="background:var(--gold)"></div>Crypto</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#b0b8d8"></div>Cash</div>
-        </div>
-      </div>
-    </div>
-    <div class="chart-canvas-wrap">
-      <canvas id="monChart"></canvas>
-    </div>
-  </section>
-
-  <!-- ══ METRICS ══ -->
-  <div class="metrics">
-
-    <!-- Stock Value -->
-    <div class="metric-card">
-      <div class="metric-label">Stock Value</div>
-      <div class="metric-val blue" id="m-stock-val">${{ '{:,.0f}'.format(stock_value) }}</div>
-      <div class="metric-sub" id="m-stock-count">{{ stock_position_count }} position{{ 's' if stock_position_count != 1 }}</div>
-      <div class="metric-stats">
-        <div class="mstat">
-          <span class="mstat-label">Today P&amp;L</span>
-          <span class="mstat-val {{ 'green' if stock_pnl >= 0 else 'red' }}" id="m-stock-pnl">{{ '+' if stock_pnl >= 0 else '' }}${{ '{:,.2f}'.format(stock_pnl) }} <span id="m-stock-pnl-pct" style="opacity:0.8;font-size:0.9em">({{ '+' if pnl_pct >= 0 else '' }}{{ '{:.2f}'.format(pnl_pct) }}%)</span></span>
-        </div>
-        <div class="mstat">
-          <span class="mstat-label">% of Portfolio</span>
-          <span class="mstat-val" id="m-stock-pct">{{ stock_pct }}%</span>
-        </div>
-        <div class="mstat">
-          <span class="mstat-label">Unrealised P&amp;L</span>
-          <span class="mstat-val {{ 'green' if stock_upl >= 0 else 'red' }}" id="m-stock-upl">{{ '+' if stock_upl >= 0 else '' }}${{ '{:,.2f}'.format(stock_upl) }} <span id="m-stock-upl-pct" style="opacity:0.8">({{ '+' if stock_upl_pct >= 0 else '' }}{{ '{:.2f}'.format(stock_upl_pct) }}%)</span></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Crypto Value -->
-    <div class="metric-card">
-      <div class="metric-label">Crypto Value</div>
-      <div class="metric-val gold" id="m-crypto-val">${{ '{:,.0f}'.format(crypto_value) }}</div>
-      <div class="metric-sub" id="m-crypto-count">{{ crypto_position_count }} position{{ 's' if crypto_position_count != 1 }}</div>
-      <div class="metric-stats">
-        <div class="mstat">
-          <span class="mstat-label">Today P&amp;L</span>
-          <span class="mstat-val {{ 'green' if crypto_pnl >= 0 else 'red' }}" id="m-crypto-pnl">{{ '+' if crypto_pnl >= 0 else '' }}${{ '{:,.2f}'.format(crypto_pnl) }} <span id="m-crypto-pnl-pct" style="opacity:0.8;font-size:0.9em">({{ '+' if pnl_pct >= 0 else '' }}{{ '{:.2f}'.format(pnl_pct) }}%)</span></span>
-        </div>
-        <div class="mstat">
-          <span class="mstat-label">% of Portfolio</span>
-          <span class="mstat-val" id="m-crypto-pct">{{ crypto_pct }}%</span>
-        </div>
-        <div class="mstat">
-          <span class="mstat-label">Unrealised P&amp;L</span>
-          <span class="mstat-val {{ 'green' if crypto_upl >= 0 else 'red' }}" id="m-crypto-upl">{{ '+' if crypto_upl >= 0 else '' }}${{ '{:,.2f}'.format(crypto_upl) }} <span id="m-crypto-upl-pct" style="opacity:0.8">({{ '+' if crypto_upl_pct >= 0 else '' }}{{ '{:.2f}'.format(crypto_upl_pct) }}%)</span></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Recent Trades -->
-    <div class="metric-card trades-card">
-      <div class="metric-label">Recent Trades</div>
-      <div class="trades-wrap" id="m-trades-scroll">
-        {% for t in recent_trades %}
-        <div class="trade-row">
-          <span class="trade-time">{{ t.time }}</span>
-          <span class="trade-sym">{{ t.symbol }}</span>
-          <span class="trade-side {{ 'buy' if t.side == 'BUY' else 'sell' }}">{{ t.side }}</span>
-          <span class="trade-qty">{{ t.qty }}</span>
-          <span class="trade-price">${{ t.price }}</span>
-        </div>
-        {% else %}
-        <div class="trade-empty">No recent trades</div>
-        {% endfor %}
-      </div>
-    </div>
-
+    {% endif %}
   </div>
-
-
-  <!-- ══ FOOTER — 3-row position ticker ══ -->
-  <footer class="footer">
-    <div class="footer-label">
-      <div class="footer-label-dot"></div>
-      POSITIONS
-    </div>
-
-    <div class="footer-rows">
-      {% set all_pos = stock_positions + crypto_positions_list %}
-
-      <!-- Row 1: Symbol -->
-      <div class="footer-row">
-        <div class="footer-row-label">SYM</div>
-        <div class="ft-track">
-          <div class="ft-belt" id="belt-sym">
-            {% for p in all_pos + all_pos %}
-            <div class="ft-chip">
-              <span class="ft-chip-sym">{{ p.symbol | replace('/USD','') }}</span>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-
-      <!-- Row 2: Price + P&L -->
-      <div class="footer-row">
-        <div class="footer-row-label">P&amp;L</div>
-        <div class="ft-track">
-          <div class="ft-belt" id="belt-pl">
-            {% for p in all_pos + all_pos %}
-            <div class="ft-chip">
-              <span class="ft-chip-price">${{ p.current }}</span>
-              <span class="ft-chip-pl {{ 'green' if p.pl >= 0 else 'red' }}">{{ '+' if p.pl >= 0 else '-' }}${{ p.pl_abs }}</span>
-              <span class="ft-chip-pct {{ 'green' if p.pl >= 0 else 'red' }}">({{ p.pl_pct }}%)</span>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-
-      <!-- Row 3: Qty / Avg / Value -->
-      <div class="footer-row">
-        <div class="footer-row-label">POS</div>
-        <div class="ft-track">
-          <div class="ft-belt" id="belt-pos">
-            {% for p in all_pos + all_pos %}
-            <div class="ft-chip">
-              <span class="ft-chip-meta">{{ p.qty }}{{ 'sh' if p.symbol in tickers else 'c' }} · avg ${{ p.avg_price }}</span>
-              <span class="ft-chip-val">${{ p.value }}</span>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-
-    </div>
-
-    <div class="footer-meta">
-      <span>UPDATED</span>
-      <span id="updated-time">{{ updated }}</span>
-      <span style="margin-top:4px;font-size:0.85em">AJAX 60s</span>
-    </div>
-  </footer>
-
+  {% endfor %}
 </div>
 
 <script>
-  // ── Live clock ──
-  function updateClock() {
-    const now = new Date();
-    document.getElementById('clock').textContent = now.toTimeString().slice(0, 8);
-  }
-  updateClock();
-  setInterval(updateClock, 1000);
-
-  // ── Trade countdowns ──
-  // Stock:  :00 of 14,15,16,17,18,19,20,21 UK time, Mon-Fri
-  // Crypto: :00 of every even hour, every day
-
-  const STOCK_HOURS = [14,15,16,17,18,19,20,21];
-
-  // Reliably extract UK time parts from any Date using Intl
-  function getUKParts(d) {
-    const fmt = new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'Europe/London',
-      hour: 'numeric', minute: 'numeric', second: 'numeric',
-      hour12: false,
-      weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric'
-    });
-    const parts = {};
-    fmt.formatToParts(d).forEach(p => { parts[p.type] = p.value; });
-    // hour12:false gives '24' for midnight on some engines — normalise
-    const h = parseInt(parts.hour) % 24;
-    return {
-      dow:  ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(parts.weekday),
-      h, m: parseInt(parts.minute), s: parseInt(parts.second)
-    };
-  }
-
-  function fmtCountdown(totalSecs) {
-    if (totalSecs <= 0) totalSecs = 0;
-    const h = Math.floor(totalSecs / 3600);
-    const m = Math.floor((totalSecs % 3600) / 60);
-    const s = totalSecs % 60;
-    if (h > 0)
-      return h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
-    return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
-  }
-
-  // Seconds from now until next stock trade, or -1 if market stays closed 7 days
-  function secsToNextStock(now) {
-    const uk = getUKParts(now);
-    // Walk forward minute by minute is slow; instead compute directly:
-    // For each candidate slot (day offset + hour), find first future one
-    for (let dayOff = 0; dayOff < 8; dayOff++) {
-      // Compute dow for this candidate day
-      const candDow = (uk.dow + dayOff) % 7;
-      if (candDow === 0 || candDow === 6) continue; // skip weekend
-
-      for (let i = 0; i < STOCK_HOURS.length; i++) {
-        const slotH = STOCK_HOURS[i];
-        // Seconds from current UK clock to this slot's :00
-        const secsToSlot = (slotH - uk.h) * 3600 - uk.m * 60 - uk.s
-                         + dayOff * 86400;
-        if (secsToSlot > 0) return secsToSlot;
-      }
-    }
-    return -1;
-  }
-
-  // Seconds from now until next even-hour :00
-  function secsToNextCrypto(now) {
-    const uk = getUKParts(now);
-    // Next even hour after current time
-    const nextEvenH = uk.h % 2 === 0
-      ? (uk.m === 0 && uk.s === 0 ? uk.h + 2 : uk.h + 2)   // already on even hour — next one
-      : uk.h + 1;                                             // on odd hour — round up
-    // Actually: next even hour strictly in future
-    const nextH = uk.m === 0 && uk.s === 0
-      ? (uk.h % 2 === 0 ? uk.h + 2 : uk.h + 1)
-      : (uk.h % 2 === 0 ? uk.h + 2 : uk.h + 1);
-    const secsToSlot = (nextH - uk.h) * 3600 - uk.m * 60 - uk.s;
-    return secsToSlot > 0 ? secsToSlot : secsToSlot + 7200;
-  }
-
-  function setCountdown(elId, secs, activeLabel, closedLabel) {
-    const el = document.getElementById(elId);
-    if (!el) return;
-    const clearCls = s => s.replace(/\b(green|red|gold|blue|purple)\b/g, '').trim();
-    if (secs < 0) {
-      el.textContent = closedLabel;
-      el.className = clearCls(el.className) + ' red';
-    } else if (secs <= 60) {
-      el.textContent = activeLabel;
-      el.className = clearCls(el.className) + ' green';
-    } else if (secs < 300) {
-      el.textContent = fmtCountdown(secs);
-      el.className = clearCls(el.className) + ' gold';
-    } else {
-      el.textContent = fmtCountdown(secs);
-      el.className = clearCls(el.className) + ' green';
-    }
-  }
-
-  function updateCountdowns() {
-    const now  = new Date();
-    const sStock  = secsToNextStock(now);
-    const sCrypto = secsToNextCrypto(now);
-    setCountdown('h-stock-countdown',  sStock,  'TRADING', 'CLOSED');
-    // Crypto is always running — use blue as default, gold when close
-    const cryptoEl = document.getElementById('h-crypto-countdown');
-    if (cryptoEl) {
-      const clearCls = s => s.replace(/\b(green|red|gold|blue|purple)\b/g,'').trim();
-      cryptoEl.textContent = fmtCountdown(sCrypto);
-      cryptoEl.className = clearCls(cryptoEl.className) + (sCrypto < 300 ? ' gold' : ' blue');
-    }
-  }
-
-  updateCountdowns();
-  setInterval(updateCountdowns, 1000);
-
-  // ── Footer belt hover — pause/resume all three rows together ──
-  (function() {
-    const footer = document.querySelector('.footer');
-    const belts  = () => document.querySelectorAll('.ft-belt');
-    footer.addEventListener('mouseenter', () => belts().forEach(b => b.classList.add('paused')));
-    footer.addEventListener('mouseleave', () => belts().forEach(b => b.classList.remove('paused')));
-  })();
-
-  // ── Sync belt chip widths so columns align across the 3 rows ──
-  function syncBelts() {
-    const belts = document.querySelectorAll('.ft-belt');
-    if (belts.length < 3) return;
-    const n = belts[0].children.length;
-    for (let i = 0; i < n; i++) {
-      let maxW = 0;
-      belts.forEach(b => { if (b.children[i]) maxW = Math.max(maxW, b.children[i].offsetWidth); });
-      belts.forEach(b => { if (b.children[i]) b.children[i].style.minWidth = maxW + 'px'; });
-    }
-  }
-  syncBelts();
-
-  // ── Portfolio chart ──
-  {% if chart_views %}
-  // Pre-resampled views from server — no date adapter needed, plain category scale
-  const CHART_VIEWS = {{ chart_views | safe }};
-  let currentView = '7d';
-
-  const ctx = document.getElementById('monChart').getContext('2d');
-  const v0  = CHART_VIEWS['7d'];
-
-  const monChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: v0.labels,
-      datasets: [
-        {
-          label: 'Stocks',
-          data: v0.stock_values,
-          borderColor: 'rgba(93,204,255,1)',
-          backgroundColor: 'rgba(93,204,255,0.3)',
-          borderWidth: 2, pointRadius: 0, fill: 'origin', tension: 0.3
-        },
-        {
-          label: 'Crypto',
-          data: v0.crypto_values,
-          borderColor: 'rgba(255,215,64,1)',
-          backgroundColor: 'rgba(255,215,64,0.25)',
-          borderWidth: 2, pointRadius: 0, fill: '-1', tension: 0.3
-        },
-        {
-          label: 'Cash',
-          data: v0.cash_values,
-          borderColor: 'rgba(176,184,216,0.85)',
-          backgroundColor: 'rgba(176,184,216,0.15)',
-          borderWidth: 1.5, pointRadius: 0, fill: '-1', tension: 0.3
-        }
-      ]
+const labels  = {{ chart_labels | safe }};
+const values  = {{ chart_values | safe }};
+const ctx = document.getElementById('milestoneChart').getContext('2d');
+new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: labels,
+    datasets: [{
+      label: 'Portfolio Value',
+      data: values,
+      borderColor: '#448aff',
+      backgroundColor: 'rgba(68,138,255,0.15)',
+      borderWidth: 2, pointRadius: 4, pointBackgroundColor: '#448aff',
+      fill: true, tension: 0.3
+    }, {
+      label: 'Starting Value',
+      data: labels.map(() => 100000),
+      borderColor: '#333a5c', borderWidth: 1,
+      borderDash: [6,4], pointRadius: 0, fill: false
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { label: ctx => '$' + ctx.raw.toLocaleString() } }
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: { mode: 'index', intersect: false }
-      },
-      scales: {
-        x: {
-          ticks: {
-            color: '#4a5270',
-            font: { family: "'Share Tech Mono'", size: 10 },
-            maxTicksLimit: 12,
-            maxRotation: 0,
-            autoSkip: true,
-          },
-          grid: { color: 'rgba(26,32,53,0.5)' }
-        },
-        y: {
-          stacked: true,
-          ticks: {
-            color: '#8b96c0',
-            font: { family: "'Share Tech Mono'", size: 10 },
-            callback: v => '$' + v.toLocaleString()
-          },
-          grid: { color: 'rgba(30,37,64,0.8)' }
-        }
-      }
-    }
-  });
-
-  function setChartView(view) {
-    currentView = view;
-    ['24h', '7d'].forEach(v => {
-      document.getElementById('vbtn-' + v).classList.toggle('active', v === view);
-    });
-    const allBtn = document.getElementById('vbtn-all');
-    allBtn.classList.toggle('active', view === 'all');
-    const vd = CHART_VIEWS[view];
-    monChart.data.labels           = vd.labels;
-    monChart.data.datasets[0].data = vd.stock_values;
-    monChart.data.datasets[1].data = vd.crypto_values;
-    monChart.data.datasets[2].data = vd.cash_values;
-    monChart.update('none');
-  }
-  {% endif %}
-
-  // ── AJAX refresh — update DOM in place, no page jump ──
-  function colourClass(val) { return val >= 0 ? 'green' : 'red'; }
-  function setEl(id, text, cls) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = text;
-    if (cls !== undefined) { el.className = el.className.replace(/\b(green|red|blue|gold|purple)\b/g, '').trim() + ' ' + cls; }
-  }
-  function setElHtml(id, html, cls) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.innerHTML = html;
-    if (cls !== undefined) { el.className = el.className.replace(/\b(green|red|blue|gold|purple)\b/g, '').trim() + ' ' + cls; }
-  }
-
-  function rebuildBelt(id, chips) {
-    const belt = document.getElementById(id);
-    if (!belt) return;
-    // Preserve animation offset by reading current transform before swap
-    const style = window.getComputedStyle(belt);
-    belt.innerHTML = chips + chips; // duplicate for seamless loop
-    // Reset animation so it restarts cleanly from current visual position
-    belt.style.animation = 'none';
-    requestAnimationFrame(() => {
-      belt.style.animation = '';
-      syncBelts();
-    });
-  }
-
-  async function ajaxRefresh() {
-    try {
-      const r = await fetch('/monitor/data');
-      if (!r.ok) return;
-      const d = await r.json();
-
-      // Header
-      setEl('h-portfolio', '$' + d.portfolio);
-      // h-pnl contains a child <span id="h-pnl-pct"> — must use setElHtml
-      setElHtml('h-pnl',
-        (d.pnl >= 0 ? '+' : '') + '$' + d.pnl_fmt +
-        ' <span id="h-pnl-pct" style="font-size:0.6em;opacity:0.8;letter-spacing:0.02em">(' +
-        (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)</span>',
-        colourClass(d.pnl));
-      setEl('h-cash',      '$' + d.cash);
-      setEl('h-return',    (d.total_return >= 0 ? '+' : '') + d.total_return + '%', colourClass(d.total_return));
-      setEl('h-positions', d.position_count);
-
-      // Metric cards
-      setEl('m-stock-val',   '$' + d.stock_value);
-      setEl('m-stock-count', d.stock_position_count + ' position' + (d.stock_position_count !== 1 ? 's' : ''));
-      setElHtml('m-stock-pnl',
-        (d.stock_pnl >= 0 ? '+' : '') + '$' + d.stock_pnl_fmt +
-        ' <span id="m-stock-pnl-pct" style="opacity:0.8;font-size:0.9em">(' +
-        (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)</span>',
-        colourClass(d.stock_pnl));
-      setEl('m-stock-pct',   d.stock_pct + '%');
-      // Use setElHtml for UPL fields — they contain a child <span> for the %,
-      // and setEl(textContent) would destroy that child on every refresh.
-      setElHtml('m-stock-upl',
-        (d.stock_upl >= 0 ? '+' : '') + '$' + d.stock_upl_fmt +
-        ' <span id="m-stock-upl-pct" style="opacity:0.8">(' +
-        (d.stock_upl_pct >= 0 ? '+' : '') + d.stock_upl_pct + '%)</span>',
-        colourClass(d.stock_upl));
-
-      setEl('m-crypto-val',    '$' + d.crypto_value);
-      setEl('m-crypto-count',  d.crypto_position_count + ' position' + (d.crypto_position_count !== 1 ? 's' : ''));
-      setElHtml('m-crypto-pnl',
-        (d.crypto_pnl >= 0 ? '+' : '') + '$' + d.crypto_pnl_fmt +
-        ' <span id="m-crypto-pnl-pct" style="opacity:0.8;font-size:0.9em">(' +
-        (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct + '%)</span>',
-        colourClass(d.crypto_pnl));
-      setEl('m-crypto-pct',    d.crypto_pct + '%');
-      setElHtml('m-crypto-upl',
-        (d.crypto_upl >= 0 ? '+' : '') + '$' + d.crypto_upl_fmt +
-        ' <span id="m-crypto-upl-pct" style="opacity:0.8">(' +
-        (d.crypto_upl_pct >= 0 ? '+' : '') + d.crypto_upl_pct + '%)</span>',
-        colourClass(d.crypto_upl));
-
-      // Recent trades
-      if (d.recent_trades) {
-        const scroll = document.getElementById('m-trades-scroll');
-        if (scroll) {
-          if (d.recent_trades.length === 0) {
-            scroll.innerHTML = '<div class="trade-empty">No recent trades</div>';
-          } else {
-            scroll.innerHTML = d.recent_trades.map(t =>
-              `<div class="trade-row">
-                <span class="trade-time">${t.time}</span>
-                <span class="trade-sym">${t.symbol}</span>
-                <span class="trade-side ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span>
-                <span class="trade-qty">${t.qty}</span>
-                <span class="trade-price">$${t.price}</span>
-              </div>`
-            ).join('');
-          }
-        }
-      }
-
-      // Sidebar ticker
-      const tickerEl = document.getElementById('tickerScroll');
-      if (tickerEl) {
-        const rows = d.signals.map(s =>
-          `<div class="ticker-item${s.held ? ' held' : ''}">
-            <span class="ticker-sym ${s.is_crypto ? 'crypto' : 'stock'}">${s.ticker}</span>
-            <span class="ticker-price">$${s.price}</span>
-            <div class="ticker-right">
-              <span class="ticker-sig sig-${s.action_cls}">${s.action}</span>
-            </div>
-          </div>`
-        ).join('');
-        tickerEl.innerHTML = rows + rows;
-      }
-
-      // Footer belts — rebuild HTML then re-sync widths
-      const symChips = d.positions.map(p =>
-        `<div class="ft-chip"><span class="ft-chip-sym">${p.sym}</span></div>`
-      ).join('');
-      const plChips = d.positions.map(p =>
-        `<div class="ft-chip">
-          <span class="ft-chip-price">$${p.current}</span>
-          <span class="ft-chip-pl ${colourClass(p.pl)}">${p.pl >= 0 ? '+' : '-'}$${p.pl_abs}</span>
-          <span class="ft-chip-pct ${colourClass(p.pl)}"> (${p.pl_pct}%)</span>
-        </div>`
-      ).join('');
-      const posChips = d.positions.map(p =>
-        `<div class="ft-chip">
-          <span class="ft-chip-meta">${p.qty}${p.is_stock ? 'sh' : 'c'} · avg $${p.avg_price}</span>
-          <span class="ft-chip-val">$${p.value}</span>
-        </div>`
-      ).join('');
-
-      rebuildBelt('belt-sym', symChips);
-      rebuildBelt('belt-pl',  plChips);
-      rebuildBelt('belt-pos', posChips);
-
-      // Chart — always merge fresh view data from the server so that
-      // switching to 7D or ALL after an AJAX tick shows current data.
-      // We only re-render the active view to avoid a visible flash.
-      if (typeof monChart !== 'undefined' && d.chart_views) {
-        Object.assign(CHART_VIEWS, d.chart_views);
-        setChartView(currentView);
-      }
-      setEl('updated-time', d.updated);
-    } catch(e) {
-      console.warn('AJAX refresh failed:', e);
+    scales: {
+      x: { ticks: { color: '#555', maxRotation: 45 }, grid: { color: '#151825' } },
+      y: { ticks: { color: '#555', callback: v => '$' + v.toLocaleString() }, grid: { color: '#151825' } }
     }
   }
-
-  // Refresh every 60 seconds without reloading the page
-  setInterval(ajaxRefresh, 60000);
+});
 </script>
+
+{% else %}
+<div class="empty">No milestones recorded yet. The first will appear this Sunday at 4am.</div>
+{% endif %}
+
 </body>
 </html>
 """
 
 
-@app.route('/monitor')
-@requires_auth
-def monitor():
+@app.template_filter('format_money')
+def format_money(val):
     try:
-        account = api.get_account()
-    except Exception as e:
-        return f"<body style='background:#060810;color:#ff3d57;font-family:monospace;padding:40px'>Connection error: {e}<br><a href='/monitor' style='color:#4fc3f7'>Retry</a></body>", 503
-
-    port_val   = float(account.portfolio_value)
-    cash_val   = float(account.cash)
-    last_eq    = float(account.last_equity)
-    pnl        = round(float(account.equity) - last_eq, 2)
-    pnl_pct    = round(pnl / last_eq * 100, 2) if last_eq else 0.0
-    start_val  = 100000.0
-    total_ret  = round(((port_val - start_val) / start_val) * 100, 2)
-
-    positions  = api.list_positions()
-    pos_dict   = {p.symbol: p for p in positions}
-
-    # ── Model info ──
-    stock_model_info  = {'accuracy': '—', 'trained_at': '—'}
-    crypto_model_info = {'accuracy': '—', 'trained_at': '—', 'target': '+0.5% / 6h'}
-    if os.path.exists('/home/jv/model_info.json'):
-        with open('/home/jv/model_info.json') as f:
-            stock_model_info = json.load(f)
-    if os.path.exists('/home/jv/crypto_model_info.json'):
-        with open('/home/jv/crypto_model_info.json') as f:
-            crypto_model_info = json.load(f)
-
-    # ── Market data (use cache if available to avoid slow yf call on monitor load) ──
-    market_data = None
-    if os.path.exists('/home/jv/market_cache.json'):
-        with open('/home/jv/market_cache.json') as f:
-            market_data = json.load(f)
-
-    # ── Portfolio history — pre-resampled per view ──
-    chart_views = build_chart_views()
-
-    # ── Recent filled orders ──
-    crypto_syms = list(CRYPTOS.keys())
-    _raw_orders = api.list_orders(status='filled', limit=15)
-    recent_trades = []
-    for o in _raw_orders:
-        sym = o.symbol.replace('/USD', '').replace('USD', '')
-        ts  = o.filled_at or o.submitted_at
-        recent_trades.append({
-            'time':   ts.strftime('%d/%m %H:%M') if ts else '—',
-            'symbol': sym,
-            'side':   o.side.upper(),
-            'qty':    o.filled_qty or o.qty,
-            'price':  f"{float(o.filled_avg_price):,.2f}" if o.filled_avg_price else '—',
-        })
-
-    stock_positions_list  = []
-    crypto_positions_list = []
-    stock_value  = 0.0
-    crypto_value = 0.0
-
-    def build_sparkline(yf_symbol, interval='5m', period='1d', points=20):
-        """Return SVG polyline points string for a 44x22 viewport."""
-        try:
-            df = yf.download(yf_symbol, period=period, interval=interval, progress=False)
-            if df.empty:
-                return ''
-            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-            closes = df['Close'].dropna().tolist()[-points:]
-            if len(closes) < 3:
-                return ''
-            mn, mx = min(closes), max(closes)
-            if mx == mn:
-                return ''
-            w, h, pad = 44, 22, 2
-            pts = []
-            for i, c in enumerate(closes):
-                x = pad + (i / (len(closes) - 1)) * (w - pad * 2)
-                y = h - pad - ((c - mn) / (mx - mn)) * (h - pad * 2)
-                pts.append(f"{x:.1f},{y:.1f}")
-            return ' '.join(pts)
-        except Exception:
-            return ''
-
-    stock_hw  = json.load(open('/home/jv/stock_highwater.json'))  if os.path.exists('/home/jv/stock_highwater.json')  else {}
-    crypto_hw = json.load(open('/home/jv/crypto_highwater.json')) if os.path.exists('/home/jv/crypto_highwater.json') else {}
-
-    STOCK_STOP  = 0.12
-    CRYPTO_STOP = 0.15
-
-    for p in positions:
-        if p.symbol in TICKERS:
-            yf_sym   = p.symbol
-            interval = '5m'
-            period   = '1d'
-            hw_map   = stock_hw
-            stop_pct = STOCK_STOP
-        else:
-            yf_sym   = p.symbol[:-3] + '-USD' if p.symbol.endswith('USD') else p.symbol
-            interval = '15m'
-            period   = '1d'
-            hw_map   = crypto_hw
-            stop_pct = CRYPTO_STOP
-
-        entry   = float(p.avg_entry_price)
-        current = float(p.current_price)
-        peak    = hw_map.get(p.symbol, entry)
-        trail_stop = peak * (1 - stop_pct)
-        gap_pct    = (current - trail_stop) / current * 100
-
-        row = {
-            'symbol':      p.symbol,
-            'name':        COMPANY_NAMES.get(p.symbol, p.symbol),
-            'qty':         int(float(p.qty)) if p.symbol in TICKERS else round(float(p.qty), 4),
-            'avg_price':   f"{entry:,.2f}",
-            'current':     f"{current:,.2f}",
-            'value':       f"{float(p.market_value):,.0f}",
-            'pl':          float(p.unrealized_pl),
-            'pl_abs':      f"{abs(float(p.unrealized_pl)):,.2f}",
-            'pl_pct':      f"{float(p.unrealized_plpc)*100:+.1f}",
-            'trail_stop':  f"{trail_stop:,.2f}",
-            'gap_pct':     f"{gap_pct:.1f}",
-            'spark':       build_sparkline(yf_sym, interval=interval, period=period),
-        }
-        if p.symbol in TICKERS:
-            stock_positions_list.append(row)
-            stock_value += float(p.market_value)
-        else:
-            crypto_positions_list.append(row)
-            crypto_value += float(p.market_value)
-
-    # ── Per-asset-class P&L and portfolio split ──
-    stock_upl  = sum(row['pl'] for row in stock_positions_list)
-    crypto_upl = sum(row['pl'] for row in crypto_positions_list)
-    total_invested = stock_value + crypto_value
-    stock_pct  = round(stock_value  / port_val * 100, 1) if port_val else 0.0
-    crypto_pct = round(crypto_value / port_val * 100, 1) if port_val else 0.0
-    cash_pct   = round(100 - stock_pct - crypto_pct, 1)
-    stock_cost  = stock_value  - stock_upl
-    crypto_cost = crypto_value - crypto_upl
-    stock_upl_pct  = round(stock_upl  / stock_cost  * 100, 2) if stock_cost  else 0.0
-    crypto_upl_pct = round(crypto_upl / crypto_cost * 100, 2) if crypto_cost else 0.0
-    # Approximate today's P&L split by weighting total daily pnl by asset-class share
-    stock_pnl  = round(pnl * (stock_value  / total_invested), 2) if total_invested else 0.0
-    crypto_pnl = round(pnl * (crypto_value / total_invested), 2) if total_invested else 0.0
-
-    # ── All signals list for the sidebar ticker ──
-    # Uses actual ML inference + sentiment override — same logic as trader.py / crypto_trader.py.
-    # Sentiment comes from cache only (no live calls on monitor load).
-    # If the stock sentiment cache is stale/missing, kick off a background refresh.
-    stock_sent_cache = load_stock_sentiment_cache()
-    cache_age = min(
-        (time.time() - v.get('fetched', 0) for v in stock_sent_cache.values()),
-        default=STOCK_SENTIMENT_TTL + 1
-    )
-    if cache_age > STOCK_SENTIMENT_TTL:
-        threading.Thread(target=refresh_stock_sentiment_cache, daemon=True).start()
-
-    def sent_fmt(score):
-        """Format sentiment score as a short coloured label."""
-        if score is None:
-            return {'score': '—', 'cls': 'dim'}
-        if score > 0.05:
-            return {'score': f'+{score:.2f}', 'cls': 'green'}
-        if score < -0.05:
-            return {'score': f'{score:.2f}', 'cls': 'red'}
-        return {'score': f'{score:+.2f}', 'cls': 'muted'}
-
-    # ── Stock signals: ML inference ──
-    # Fetch market indicators and sector returns once, shared across all tickers.
-    try:
-        mkt_row, _btc = get_market_indicators()
+        return f"{float(val):,.2f}"
     except Exception:
-        mkt_row = None
-
-    all_stock_returns_mon = {}
-    for t in TICKERS:
-        try:
-            df_r = yf.download(t, period="10d", interval="1d", progress=False)
-            df_r.columns = [col[0] if isinstance(col, tuple) else col for col in df_r.columns]
-            ret = df_r['Close'].pct_change()
-            all_stock_returns_mon[t] = {'latest': float(ret.iloc[-1]), '5d': float(ret.iloc[-5:].mean())}
-        except Exception:
-            all_stock_returns_mon[t] = {'latest': 0.0, '5d': 0.0}
-
-    all_signals = []
-    for ticker in TICKERS:
-        p = pos_dict.get(ticker)
-        try:
-            df       = get_stock_features(ticker)
-            latest   = df.iloc[-1].copy()
-            cur_price = float(df['Close'].iloc[-1])
-            mom, mom_5d = get_sector_momentum(ticker, all_stock_returns_mon)
-            latest['Sector_Momentum']    = mom
-            latest['Sector_Momentum_5d'] = mom_5d
-            if mkt_row is not None:
-                latest['VIX']           = float(mkt_row['VIX'])
-                latest['SPY_Return']    = float(mkt_row['SPY_Return'])
-                latest['SPY_Trend']     = float(mkt_row['SPY_Trend'])
-                latest['SPY_Return_5d'] = float(mkt_row['SPY_Return_5d'])
-                latest['QQQ_Return']    = float(mkt_row['QQQ_Return'])
-                latest['QQQ_Trend']     = float(mkt_row['QQQ_Trend'])
-                latest['QQQ_Return_5d'] = float(mkt_row['QQQ_Return_5d'])
-            else:
-                for col in ['VIX','SPY_Return','SPY_Trend','SPY_Return_5d',
-                            'QQQ_Return','QQQ_Trend','QQQ_Return_5d']:
-                    latest[col] = 0.0
-            feature_row = pd.DataFrame([latest[stock_features]])
-            pred  = stock_model.predict(feature_row)[0]
-            conf  = stock_model.predict_proba(feature_row)[0][pred]
-            entry = stock_sent_cache.get(ticker)
-            raw_score = entry['score'] if entry else None
-            sent_score = raw_score if raw_score is not None else 0.0
-            sig = 'BUY' if pred == 1 else 'SELL'
-            if conf < 0.60:
-                sig = 'HOLD'
-            elif sig == 'BUY' and sent_score < -0.05:
-                sig = 'HOLD'
-            elif sig == 'SELL' and sent_score > 0.05:
-                sig = 'HOLD'
-            price = f"{cur_price:,.2f}"
-        except Exception:
-            entry = stock_sent_cache.get(ticker)
-            raw_score = entry['score'] if entry else None
-            sig   = 'HOLD'
-            price = f"{float(p.current_price):,.2f}" if p else "—"
-        all_signals.append({
-            'ticker': ticker, 'price': price, 'signal': sig,
-            'held': bool(p), 'raw_score': raw_score, 'is_crypto': False,
-        })
-
-    # ── Crypto signals: ML inference ──
-    try:
-        crypto_mkt_mon = get_crypto_market_indicators()
-    except Exception:
-        crypto_mkt_mon = None
-
-    all_crypto_returns_mon = {}
-    for sym, yf_sym in CRYPTOS.items():
-        try:
-            df_r = yf.download(yf_sym, period="5d", interval="1h", progress=False)
-            df_r.columns = [col[0] if isinstance(col, tuple) else col for col in df_r.columns]
-            ret = df_r['Close'].pct_change()
-            all_crypto_returns_mon[sym] = {'latest': float(ret.iloc[-1]), '24h': float(ret.iloc[-24:].mean())}
-        except Exception:
-            all_crypto_returns_mon[sym] = {'latest': 0.0, '24h': 0.0}
-    crypto_mom_mon, crypto_mom_24h_mon = get_crypto_momentum(all_crypto_returns_mon)
-
-    for symbol, yf_symbol in CRYPTOS.items():
-        alpaca_sym = symbol.replace('/', '')
-        p = pos_dict.get(alpaca_sym)
-        raw_score = get_crypto_sentiment_cached(symbol)
-        try:
-            df       = get_crypto_features(yf_symbol)
-            latest   = df.iloc[-1].copy()
-            cur_price = float(df['Close'].iloc[-1])
-            latest['Crypto_Momentum']     = crypto_mom_mon
-            latest['Crypto_Momentum_24h'] = crypto_mom_24h_mon
-            if crypto_mkt_mon:
-                latest['VIX']             = crypto_mkt_mon['VIX']
-                latest['SPY_Return']      = crypto_mkt_mon['SPY_Return']
-                latest['SPY_Trend']       = crypto_mkt_mon['SPY_Trend']
-                latest['SPY_Return_24h']  = crypto_mkt_mon['SPY_Return_24h']
-                if symbol == 'BTC/USD':
-                    latest['BTC_Return']     = 0.0
-                    latest['BTC_Trend']      = 0.0
-                    latest['BTC_Return_24h'] = 0.0
-                else:
-                    latest['BTC_Return']     = crypto_mkt_mon['BTC_Return']
-                    latest['BTC_Trend']      = crypto_mkt_mon['BTC_Trend']
-                    latest['BTC_Return_24h'] = crypto_mkt_mon['BTC_Return_24h']
-            else:
-                for col in ['VIX','SPY_Return','SPY_Trend','SPY_Return_24h',
-                            'BTC_Return','BTC_Trend','BTC_Return_24h']:
-                    latest[col] = 0.0
-            feature_row = pd.DataFrame([latest[crypto_features]])
-            pred  = crypto_model.predict(feature_row)[0]
-            conf  = crypto_model.predict_proba(feature_row)[0][pred]
-            sent_score = raw_score if raw_score is not None else 0.0
-            sig = 'BUY' if pred == 1 else 'SELL'
-            if conf < 0.65:
-                sig = 'HOLD'
-            elif sig == 'BUY' and sent_score < -0.05:
-                sig = 'HOLD'
-            elif sig == 'SELL' and sent_score > 0.05:
-                sig = 'HOLD'
-            price = f"{cur_price:,.4f}"
-        except Exception:
-            sig   = 'HOLD'
-            price = f"{float(p.current_price):,.4f}" if p else "—"
-        all_signals.append({
-            'ticker': symbol.replace('/USD', ''), 'price': price, 'signal': sig,
-            'held': bool(p), 'raw_score': raw_score, 'is_crypto': True,
-        })
-
-    # ── Filter to actionable only, then attach action label ──
-    def _is_actionable(item):
-        if item['held']:
-            return True
-        if item['signal'] == 'BUY' and item['raw_score'] is not None and item['raw_score'] > 0.05:
-            return True
-        return False
-
-    def _make_action(sig, held):
-        if sig == 'BUY':
-            return ('BUY MORE', 'buymore') if held else ('HOLD', 'hold')
-        if sig == 'SELL':
-            return ('SELL', 'sell')
-        return ('HOLD', 'hold')
-
-    all_signals = [item for item in all_signals if _is_actionable(item)]
-    if not all_signals:  # fallback — show all open positions
-        all_signals = [item for item in all_signals if item['held']]
-    for item in all_signals:
-        item['action'], item['action_cls'] = _make_action(item['signal'], item['held'])
-        item.pop('raw_score', None)
-
-    return render_template_string(MONITOR_HTML,
-        cash=f"{cash_val:,.2f}",
-        portfolio=f"{port_val:,.2f}",
-        pnl=pnl,
-        pnl_pct=pnl_pct,
-        total_return=total_ret,
-        position_count=len(positions),
-        stock_position_count=len(stock_positions_list),
-        crypto_position_count=len(crypto_positions_list),
-        stock_value=stock_value,
-        crypto_value=crypto_value,
-        stock_pnl=stock_pnl,
-        crypto_pnl=crypto_pnl,
-        stock_pct=stock_pct,
-        crypto_pct=crypto_pct,
-        cash_pct=cash_pct,
-        stock_upl=stock_upl,
-        stock_upl_pct=stock_upl_pct,
-        crypto_upl=crypto_upl,
-        crypto_upl_pct=crypto_upl_pct,
-        stock_positions=stock_positions_list,
-        crypto_positions_list=crypto_positions_list,
-        all_signals=all_signals,
-        market=market_data,
-        stock_model_info=stock_model_info,
-        crypto_model_info=crypto_model_info,
-        recent_trades=recent_trades,
-        chart_views=json.dumps(chart_views),
-        tickers=TICKERS,
-        updated=datetime.now().strftime('%H:%M:%S'),
-    )
+        return str(val)
 
 
-
-
-# ─────────────────────────────────────────────────────────────
-#  MONITOR DATA  –  JSON endpoint for AJAX refresh
-#  Returns all dynamic values; skips sparklines for speed.
-# ─────────────────────────────────────────────────────────────
-from flask import jsonify
-
-@app.route('/monitor/data')
+@app.route('/milestones')
 @requires_auth
-def monitor_data():
-    try:
-        account = api.get_account()
-    except Exception as e:
-        return jsonify({'error': str(e)}), 503
+def milestones_page():
+    import json as _json
 
-    port_val  = float(account.portfolio_value)
-    cash_val  = float(account.cash)
-    last_eq   = float(account.last_equity)
-    pnl       = round(float(account.equity) - last_eq, 2)
-    pnl_pct   = round(pnl / last_eq * 100, 2) if last_eq else 0.0
-    start_val = 100000.0
-    total_ret = round(((port_val - start_val) / start_val) * 100, 2)
+    raw = []
+    if os.path.exists('/home/jv/milestones.json'):
+        with open('/home/jv/milestones.json') as f:
+            raw = _json.load(f)
 
-    positions = api.list_positions()
-    pos_dict  = {p.symbol: p for p in positions}
+    if not raw:
+        return render_template_string(MILESTONES_HTML, milestones=[], latest={},
+                                      sharpe=None, chart_labels='[]', chart_values='[]')
 
-    # Model info
-    stock_model_info  = {'accuracy': '—', 'trained_at': '—'}
-    crypto_model_info = {'accuracy': '—', 'trained_at': '—', 'target': '+0.5% / 6h', 'buy_rate': '—'}
-    if os.path.exists('/home/jv/model_info.json'):
-        with open('/home/jv/model_info.json') as f:
-            stock_model_info = json.load(f)
-    if os.path.exists('/home/jv/crypto_model_info.json'):
-        with open('/home/jv/crypto_model_info.json') as f:
-            crypto_model_info = json.load(f)
+    import math as _math
+    def _calc_sharpe(ms):
+        values = [m['portfolio_value'] for m in ms if 'portfolio_value' in m]
+        if len(values) < 3:
+            return None
+        weekly_returns = [(values[i] - values[i-1]) / values[i-1] for i in range(1, len(values))]
+        n = len(weekly_returns)
+        mean_r = sum(weekly_returns) / n
+        variance = sum((r - mean_r) ** 2 for r in weekly_returns) / (n - 1)
+        std_r = _math.sqrt(variance)
+        if std_r == 0:
+            return None
+        return round((mean_r - 0.05 / 52) / std_r * _math.sqrt(52), 2)
 
-    # Portfolio history — pre-resampled per view
-    chart_views = build_chart_views()
+    sharpe = _calc_sharpe(raw)
+    chart_labels = [m['date'] for m in raw]
+    chart_values = [m['portfolio_value'] for m in raw]
 
-    # Recent filled orders
-    _raw_orders = api.list_orders(status='filled', limit=15)
-    recent_trades = []
-    for o in _raw_orders:
-        sym = o.symbol.replace('/USD', '').replace('USD', '')
-        ts  = o.filled_at or o.submitted_at
-        recent_trades.append({
-            'time':   ts.strftime('%d/%m %H:%M') if ts else '—',
-            'symbol': sym,
-            'side':   o.side.upper(),
-            'qty':    o.filled_qty or o.qty,
-            'price':  f"{float(o.filled_avg_price):,.2f}" if o.filled_avg_price else '—',
-        })
-
-    # Positions (no sparklines)
-    stock_positions_list  = []
-    crypto_positions_list = []
-    stock_value  = 0.0
-    crypto_value = 0.0
-    _shw = json.load(open('/home/jv/stock_highwater.json'))  if os.path.exists('/home/jv/stock_highwater.json')  else {}
-    _chw = json.load(open('/home/jv/crypto_highwater.json')) if os.path.exists('/home/jv/crypto_highwater.json') else {}
-    for p in positions:
-        is_stock = p.symbol in TICKERS
-        entry    = float(p.avg_entry_price)
-        current  = float(p.current_price)
-        hw_map   = _shw if is_stock else _chw
-        stop_pct = 0.12 if is_stock else 0.15
-        peak     = hw_map.get(p.symbol, entry)
-        trail_stop = peak * (1 - stop_pct)
-        gap_pct    = (current - trail_stop) / current * 100
-        row = {
-            'sym':        p.symbol.replace('/USD', '').replace('USD', ''),
-            'symbol':     p.symbol,
-            'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 4),
-            'avg_price':  f"{entry:,.2f}",
-            'current':    f"{current:,.2f}",
-            'value':      f"{float(p.market_value):,.0f}",
-            'pl':         float(p.unrealized_pl),
-            'pl_abs':     f"{abs(float(p.unrealized_pl)):,.2f}",
-            'pl_pct':     f"{float(p.unrealized_plpc)*100:+.1f}",
-            'is_stock':   is_stock,
-            'trail_stop': f"{trail_stop:,.2f}",
-            'gap_pct':    f"{gap_pct:.1f}",
-        }
-        if is_stock:
-            stock_positions_list.append(row)
-            stock_value += float(p.market_value)
-        else:
-            crypto_positions_list.append(row)
-            crypto_value += float(p.market_value)
-
-    all_positions = stock_positions_list + crypto_positions_list
-
-    stock_upl  = sum(r['pl'] for r in stock_positions_list)
-    crypto_upl = sum(r['pl'] for r in crypto_positions_list)
-    total_inv  = stock_value + crypto_value
-    stock_pct  = round(stock_value  / port_val * 100, 1) if port_val else 0.0
-    crypto_pct = round(crypto_value / port_val * 100, 1) if port_val else 0.0
-    cash_pct   = round(100 - stock_pct - crypto_pct, 1)
-    stock_cost  = stock_value  - stock_upl
-    crypto_cost = crypto_value - crypto_upl
-    stock_upl_pct  = round(stock_upl  / stock_cost  * 100, 2) if stock_cost  else 0.0
-    crypto_upl_pct = round(crypto_upl / crypto_cost * 100, 2) if crypto_cost else 0.0
-    stock_pnl  = round(pnl * (stock_value  / total_inv), 2) if total_inv else 0.0
-    crypto_pnl = round(pnl * (crypto_value / total_inv), 2) if total_inv else 0.0
-
-    # Signals — P&L based + cached sentiment
-    stock_sent_cache = load_stock_sentiment_cache()
-
-    def sent_fmt(score):
-        if score is None:
-            return {'score': '—', 'cls': 'dim'}
-        if score > 0.05:
-            return {'score': f'+{score:.2f}', 'cls': 'green'}
-        if score < -0.05:
-            return {'score': f'{score:.2f}', 'cls': 'red'}
-        return {'score': f'{score:+.2f}', 'cls': 'muted'}
-
-    _signals_raw = []
-    for ticker in TICKERS:
-        p     = pos_dict.get(ticker)
-        price = f"{float(p.current_price):,.2f}" if p else '—'
-        sig   = 'HOLD'
-        if p:
-            chg = float(p.unrealized_plpc)
-            sig = 'BUY' if chg > 0.01 else ('SELL' if chg < -0.02 else 'HOLD')
-        entry     = stock_sent_cache.get(ticker)
-        raw_score = entry['score'] if entry else None
-        _signals_raw.append({'ticker': ticker, 'price': price, 'signal': sig,
-                             'held': bool(p), 'raw_score': raw_score, 'is_crypto': False})
-    for symbol in CRYPTOS:
-        alpaca_sym = symbol.replace('/', '')
-        p     = pos_dict.get(alpaca_sym)
-        price = f"{float(p.current_price):,.2f}" if p else '—'
-        sig   = 'HOLD'
-        if p:
-            chg = float(p.unrealized_plpc)
-            sig = 'BUY' if chg > 0.01 else ('SELL' if chg < -0.02 else 'HOLD')
-        raw_score = get_crypto_sentiment_cached(symbol)
-        _signals_raw.append({'ticker': symbol.replace('/USD', ''), 'price': price, 'signal': sig,
-                             'held': bool(p), 'raw_score': raw_score, 'is_crypto': True})
-
-    # Filter: open positions always shown; unpositioned only if BUY + positive sentiment
-    signals = [s for s in _signals_raw
-               if s['held'] or (s['signal'] == 'BUY' and s['raw_score'] is not None and s['raw_score'] > 0.05)]
-    if not signals:
-        signals = [s for s in _signals_raw if s['held']]
-    # Attach action label, strip internal keys
-    for s in signals:
-        s['action'], s['action_cls'] = (
-            ('BUY MORE', 'buymore') if s['signal'] == 'BUY' and s['held'] else
-            ('HOLD',     'hold')    if s['signal'] == 'BUY' else
-            ('SELL',     'sell')    if s['signal'] == 'SELL' else
-            ('HOLD',     'hold')
-        )
-        s.pop('raw_score', None)
-
-    return jsonify(
-        portfolio            = f"{port_val:,.2f}",
-        cash                 = f"{cash_val:,.2f}",
-        pnl                  = pnl,
-        pnl_fmt              = f"{abs(pnl):,.2f}",
-        pnl_pct              = pnl_pct,
-        total_return         = total_ret,
-        position_count       = len(positions),
-        stock_value          = f"{stock_value:,.0f}",
-        crypto_value         = f"{crypto_value:,.0f}",
-        stock_position_count = len(stock_positions_list),
-        crypto_position_count= len(crypto_positions_list),
-        stock_pnl            = stock_pnl,
-        stock_pnl_fmt        = f"{abs(stock_pnl):,.2f}",
-        stock_pct            = stock_pct,
-        crypto_pct           = crypto_pct,
-        cash_pct             = cash_pct,
-        stock_upl            = stock_upl,
-        stock_upl_fmt        = f"{abs(stock_upl):,.2f}",
-        stock_upl_pct        = stock_upl_pct,
-        crypto_pnl           = crypto_pnl,
-        crypto_pnl_fmt       = f"{abs(crypto_pnl):,.2f}",
-        crypto_upl           = crypto_upl,
-        crypto_upl_fmt       = f"{abs(crypto_upl):,.2f}",
-        crypto_upl_pct       = crypto_upl_pct,
-        stock_model_accuracy = stock_model_info.get('accuracy', '—'),
-        stock_model_trained  = stock_model_info.get('trained_at', '—'),
-        crypto_model_accuracy= crypto_model_info.get('accuracy', '—'),
-        crypto_model_trained = crypto_model_info.get('trained_at', '—'),
-        crypto_buy_rate      = crypto_model_info.get('buy_rate', '—'),
-        positions            = all_positions,
-        signals              = signals,
-        recent_trades        = recent_trades,
-        chart_views          = chart_views,
-        updated              = datetime.now().strftime('%H:%M:%S'),
+    return render_template_string(MILESTONES_HTML,
+        milestones=raw,
+        latest=raw[-1],
+        sharpe=sharpe,
+        chart_labels=_json.dumps(chart_labels),
+        chart_values=_json.dumps(chart_values),
     )
 
 

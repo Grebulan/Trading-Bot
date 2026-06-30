@@ -335,12 +335,9 @@ def main():
                 print(f"  ⏸️  Skipping — confidence too low ({conf:.1%})")
                 continue
 
-            # Sentiment override
+            # Sentiment override (BUY only — ML SELL signals disabled)
             if signal == 'BUY' and sent_score < -0.05:
                 print(f"  ⏸️  Skipping BUY — negative news ({sent_score:.2f})")
-                continue
-            if signal == 'SELL' and sent_score > 0.05:
-                print(f"  ⏸️  Skipping SELL — positive news ({sent_score:.2f})")
                 continue
 
             if signal == 'BUY' and alpaca_symbol not in positions:
@@ -357,11 +354,13 @@ def main():
                     print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
                     continue
                 place_trade(symbol, 'buy', cash, current_price)
-            elif signal == 'SELL' and alpaca_symbol in positions:
-                place_trade(symbol, 'sell', cash, current_price)
+            elif signal == 'BUY' and alpaca_symbol in positions:
+                print(f"  ⏸️  Already holding")
             else:
-                action = 'Nothing to sell' if signal == 'SELL' else 'Already holding'
-                print(f"  ⏸️  {action}")
+                # ML SELL signals disabled — model predicts BUY outcomes only;
+                # pred==0 means "unlikely to hit +25% TP", not "will fall".
+                # Exits handled exclusively by trailing stop and take-profit above.
+                print(f"  ⏸️  No BUY signal")
 
         except Exception as e:
             print(f"  ❌ Error: {e}")

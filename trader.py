@@ -56,8 +56,13 @@ TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
 STOP_LOSS       = 0.12   # 12% trailing — moves up with price
 TAKE_PROFIT     = 0.20   # 20% — let winners run for weeks
-MAX_POSITIONS   = 8      # max simultaneous stock positions
+MAX_POSITIONS   = 8      # max simultaneous stock positions (excludes SPY)
 VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
+
+# SPY default position — holds spare cash when no stock signals are firing
+SPY_TRAIL_STOP  = 0.05   # 5% trailing stop — conservative given SPY is majority of portfolio
+SPY_VIX_CRASH   = 40     # hard sell if VIX spikes above this (sudden crash)
+SPY_MIN_RESERVE = 2000   # always keep this much cash free
 
 HIGHWATER_FILE  = '/home/jv/stock_highwater.json'
 
@@ -308,22 +313,10 @@ def run():
                         save_highwater(hw)
                     continue
 
-                if pred == 0 and conf >= 0.60:
-                    if sent_score > 0.05:
-                        print(f"  ⏸️  Skipping SELL — positive news ({sent_score:.2f})")
-                        log_signal(ticker, 'SELL', conf, sent_score, current_price, False, 'sentiment_override')
-                    else:
-                        print(f"  📉 SELL signal — selling position")
-                        api.submit_order(symbol=ticker, qty=float(pos.qty),
-                                         side='sell', type='market', time_in_force='day')
-                        log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'ml_signal')
-                        if ticker in hw:
-                            del hw[ticker]
-                            save_highwater(hw)
-                    signals_logged += 1
-                    continue
-                else:
-                    continue
+                # ML SELL signals disabled — model predicts BUY outcomes only;
+                # pred==0 means "unlikely to hit +20% TP", not "will fall".
+                # Exits are handled exclusively by trailing stop and take-profit above.
+                continue
 
             # --- BUY logic ---
             if pred == 1 and conf >= 0.60:
@@ -381,6 +374,100 @@ def run():
             print(f"  ❌ Error: {e}")
 
     print(f"\n  📝 Logged {signals_logged} signals")
+
+    # --- SPY default position ---
+    # Holds spare cash when no individual stock signals are firing.
+    # Exits on trailing stop, VIX crash spike, or bear regime.
+    print("\n📊 SPY (default position)")
+    try:
+        spy_df = get_features('SPY')
+        spy_price = float(spy_df['Close'].iloc[-1])
+        spy_pos   = positions.get('SPY')
+        # Refresh positions in case stock trades above changed cash
+        account   = api.get_account()
+        cash      = float(account.cash)
+
+        # Cancel pending SPY buys; deduct other pending buys from available cash
+        # so SPY doesn't over-commit funds that are already spoken for.
+        open_orders = api.list_orders(status='open')
+        pending_spend = 0.0
+        for o in open_orders:
+            if o.symbol == 'SPY' and o.side == 'buy':
+                api.cancel_order(o.id)
+                print(f"  🗑️  Cancelled stale pending SPY buy order ({o.id[:8]}...)")
+            elif o.side == 'buy':
+                try:
+                    o_df = get_features(o.symbol)
+                    o_price = float(o_df['Close'].iloc[-1])
+                except Exception:
+                    o_price = 0.0
+                pending_spend += float(o.qty) * o_price
+        if pending_spend > 0:
+            print(f"  ⚠️  Pending buy orders: ${pending_spend:,.2f} — deducting from available cash")
+        cash -= pending_spend
+
+        if spy_pos:
+            entry      = float(spy_pos.avg_entry_price)
+            spy_qty    = float(spy_pos.qty)
+            pnl_pct    = (spy_price - entry) / entry
+            peak       = hw.get('SPY', entry)
+            if spy_price > peak:
+                hw['SPY'] = spy_price
+                peak      = spy_price
+                save_highwater(hw)
+            trail_pct  = (spy_price - peak) / peak
+            trail_stop = peak * (1 - SPY_TRAIL_STOP)
+            print(f"  Holding {spy_qty:.4f} shares, entry ${entry:,.2f}, P&L {pnl_pct:+.1%} | Trail stop ${trail_stop:,.2f}")
+
+            vix_now     = float(mkt['VIX'])
+            bear_regime = not mkt['SPY_Regime']
+
+            if trail_pct <= -SPY_TRAIL_STOP:
+                print(f"  🛑 SPY trailing stop — {trail_pct:.1%} from peak ${peak:,.2f}")
+                api.submit_order(symbol='SPY', qty=spy_qty, side='sell',
+                                 type='market', time_in_force='day')
+                if 'SPY' in hw:
+                    del hw['SPY']
+                    save_highwater(hw)
+            elif vix_now > SPY_VIX_CRASH:
+                print(f"  🚨 SPY crash exit — VIX={vix_now:.1f} above crash threshold ({SPY_VIX_CRASH})")
+                api.submit_order(symbol='SPY', qty=spy_qty, side='sell',
+                                 type='market', time_in_force='day')
+                if 'SPY' in hw:
+                    del hw['SPY']
+                    save_highwater(hw)
+            elif bear_regime:
+                print(f"  🚫 SPY bear regime exit — SPY below 200-day MA")
+                api.submit_order(symbol='SPY', qty=spy_qty, side='sell',
+                                 type='market', time_in_force='day')
+                if 'SPY' in hw:
+                    del hw['SPY']
+                    save_highwater(hw)
+            else:
+                print(f"  ✅ Holding — no exit conditions triggered")
+
+        else:
+            # Buy SPY with spare cash if conditions are favourable.
+            # Use GTC so the order carries to next open if placed near/after close.
+            available = cash - SPY_MIN_RESERVE
+            if available < 1000:
+                print(f"  ⏸️  Skipping — insufficient spare cash (${cash:,.2f})")
+            elif not mkt['SPY_Regime']:
+                print(f"  ⏸️  Skipping — bear regime (SPY below 200-day MA)")
+            elif float(mkt['VIX']) > SPY_VIX_CRASH:
+                print(f"  ⏸️  Skipping — VIX too high ({float(mkt['VIX']):.1f})")
+            else:
+                qty = int(available / spy_price)  # whole shares only — no fractional restriction
+                if qty < 1:
+                    print(f"  ⏸️  Skipping — insufficient cash for 1 share (${available:,.2f} < ${spy_price:,.2f})")
+                else:
+                    print(f"  ✅ BUY {qty} SPY @ ${spy_price:.2f} = ${qty * spy_price:,.2f} (spare cash)")
+                    api.submit_order(symbol='SPY', qty=qty, side='buy',
+                                     type='market', time_in_force='day')
+
+    except Exception as e:
+        print(f"  ❌ SPY error: {e}")
+
     print("=" * 50)
     print("✅ Done!")
     print("=" * 50)

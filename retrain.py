@@ -96,7 +96,7 @@ TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 STOCK_FEATURES = [
     'SMA_10','SMA_30','SMA_50','EMA_12','EMA_26','MACD','RSI',
     'Return','Return_5d','Return_10d','Return_20d','Volatility','High_Low',
-    'BB_position','BB_width','Vol_Ratio','Vol_Spike','DayOfWeek',
+    'BB_position','BB_width','Vol_Ratio','Vol_Spike',
     'Sector_Momentum','Sector_Momentum_5d',
     'VIX','SPY_Return','SPY_Trend','SPY_Return_5d',
     'QQQ_Return','QQQ_Trend','QQQ_Return_5d',
