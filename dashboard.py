@@ -503,11 +503,11 @@ HTML = """
               background: #1a1d2e; padding: 8px 20px; margin-bottom: 15px;
               border-bottom: 2px solid #252840; position: sticky; top: 0; z-index: 100; }
     .topnav h1 { font-size: 1.1em; display: inline; }
-    .topnav .subtitle { color: #888; font-size: 0.78em; margin-left: 14px; }
+    .topnav .subtitle { color: #9aa3b5; font-size: 0.78em; margin-left: 14px; }
     .nav-buttons { display: flex; gap: 10px; }
     .nav-btn { padding: 8px 20px; border-radius: 8px; cursor: pointer; font-weight: bold;
                font-size: 0.95em; border: 2px solid transparent; transition: all 0.2s;
-               background: #252840; color: #888; }
+               background: #252840; color: #9aa3b5; }
     .nav-btn.active { color: #fff; border-color: #448aff; background: #2e3250; }
     .page { display: none; padding: 0 20px 20px 20px; }
     .page.active { display: block; }
@@ -515,23 +515,23 @@ HTML = """
     .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
              gap: 15px; flex: 1; }
     .card { background: #1a1d2e; border-radius: 12px; padding: 18px; }
-    .card h2 { font-size: 0.75em; color: #888; margin-bottom: 8px; }
+    .card h2 { font-size: 0.75em; color: #9aa3b5; margin-bottom: 8px; }
     .card .value { font-size: 1.4em; font-weight: bold; }
     .alloc-chart-wrap { background: #1a1d2e; border-radius: 12px; padding: 14px 18px;
                         display: flex; flex-direction: column; justify-content: center;
                         min-width: 220px; max-width: 260px; }
-    .alloc-chart-wrap h2 { font-size: 0.75em; color: #888; margin-bottom: 8px; }
+    .alloc-chart-wrap h2 { font-size: 0.75em; color: #9aa3b5; margin-bottom: 8px; }
     .alloc-inner { display: flex; align-items: center; gap: 12px; }
     .alloc-inner canvas { width: 90px !important; height: 90px !important; flex-shrink: 0; }
     .alloc-legend { font-size: 0.75em; color: #aaa; line-height: 2; white-space: nowrap; }
     .card .value.small { font-size: 1em; }
-    .green { color: #00c853; } .red { color: #ff1744; }
+    .green { color: #00c853; } .red { color: #ff4d6a; }
     .yellow { color: #ffd600; } .blue { color: #448aff; }
     .market-bar { background: #1a1d2e; border-radius: 12px; padding: 18px;
                   margin-bottom: 25px; display: flex; gap: 30px; flex-wrap: wrap; }
-    .market-item h2 { font-size: 0.75em; color: #888; margin-bottom: 4px; }
+    .market-item h2 { font-size: 0.75em; color: #9aa3b5; margin-bottom: 4px; }
     .market-item .val { font-size: 1.2em; font-weight: bold; }
-    .vix-low { color: #00c853; } .vix-mid { color: #ffd600; } .vix-high { color: #ff1744; }
+    .vix-low { color: #00c853; } .vix-mid { color: #ffd600; } .vix-high { color: #ff4d6a; }
     .ticker-wrap { background: #1a1d2e; border-radius: 10px; padding: 12px;
                    margin-bottom: 25px; overflow: hidden; }
     #ticker { display: flex; gap: 40px; white-space: nowrap;
@@ -540,7 +540,7 @@ HTML = """
     @keyframes scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
     .chart-wrap { background: #1a1d2e; border-radius: 12px; padding: 20px; margin-bottom: 25px; }
     .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-    .chart-header h2 { font-size: 1em; color: #888; }
+    .chart-header h2 { font-size: 1em; color: #9aa3b5; }
     .chart-toggles { display: flex; gap: 8px; }
     .chart-toggle { padding: 4px 12px; border-radius: 20px; font-size: 0.75em;
                     font-weight: bold; cursor: pointer; border: 2px solid; transition: all 0.2s;
@@ -557,13 +557,13 @@ HTML = """
                     margin-bottom: 25px; border-radius: 12px; }
     table { width: 100%; border-collapse: collapse; background: #1a1d2e;
             border-radius: 12px; overflow: hidden; margin-bottom: 0; }
-    th { background: #252840; padding: 12px 15px; text-align: left; font-size: 0.8em; color: #888; }
+    th { background: #252840; padding: 12px 15px; text-align: left; font-size: 0.8em; color: #9aa3b5; }
     td { padding: 12px 15px; border-top: 1px solid #252840; font-size: 0.9em; }
     .badge { padding: 3px 10px; border-radius: 20px; font-size: 0.8em; font-weight: bold; }
     .badge.buy   { background: #00c85322; color: #00c853; }
-    .badge.sell  { background: #ff174422; color: #ff1744; }
+    .badge.sell  { background: #ff4d6a22; color: #ff4d6a; }
     .badge.hold  { background: #ffd60022; color: #ffd600; }
-    .badge.error { background: #88888822; color: #888; }
+    .badge.error { background: #9aa3b522; color: #9aa3b5; }
     .section-title { font-size: 1.1em; margin: 0 0 15px 0; }
     /* Tooltip */
     .tip { position: relative; display: inline-block; cursor: default;
@@ -611,16 +611,16 @@ HTML = """
     <div style="display:flex;align-items:center;gap:16px">
       <span class="topnav h1">🤖 Trading Bot</span>
       <span class="subtitle">Updated: {{ updated }} &bull; auto-refresh 5min</span>
-      <a href="/milestones" style="padding:4px 12px;border-radius:6px;background:#1a1d2e;border:1px solid #2a2d4a;color:#888;font-size:0.78em;font-weight:bold;text-decoration:none" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#888'">📍 Milestones</a>
+      <a href="/milestones" style="padding:4px 12px;border-radius:6px;background:#1a1d2e;border:1px solid #2a2d4a;color:#9aa3b5;font-size:0.78em;font-weight:bold;text-decoration:none" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#9aa3b5'">📍 Milestones</a>
     </div>
     <div class="nav-header-right" style="display:flex;align-items:center;gap:20px">
-      <span class="nav-countdown" style="font-size:0.78em;color:#888">
+      <span class="nav-countdown" style="font-size:0.78em;color:#9aa3b5">
         📈 <span id="nav-stock-countdown" style="font-weight:bold">--:--</span>
       </span>
-      <span class="nav-countdown" style="font-size:0.78em;color:#888">
+      <span class="nav-countdown" style="font-size:0.78em;color:#9aa3b5">
         🪙 <span id="nav-crypto-countdown" style="font-weight:bold">--:--</span>
       </span>
-      <span class="nav-counts" style="color:#555;font-size:0.82em">{{ stocks|length }}s · {{ crypto|length }}c</span>
+      <span class="nav-counts" style="color:#8c93a6;font-size:0.82em">{{ stocks|length }}s · {{ crypto|length }}c</span>
     </div>
   </div>
 
@@ -631,18 +631,18 @@ HTML = """
         {% for s in stocks + crypto %}
         <span style="font-size:0.95em">
           <span class="tip"><strong>{{ s.ticker }}</strong><span class="tiptext">{{ s.name }}</span></span>
-          <span style="color:#888">${{ s.price }}</span>
+          <span style="color:#9aa3b5">${{ s.price }}</span>
           {% if s.signal == 'BUY' %}<span style="color:#00c853">▲</span>
-          {% elif s.signal == 'SELL' %}<span style="color:#ff1744">▼</span>
+          {% elif s.signal == 'SELL' %}<span style="color:#ff4d6a">▼</span>
           {% else %}<span style="color:#ffd600">—</span>{% endif %}
         </span>
         {% endfor %}
         {% for s in stocks + crypto %}
         <span style="font-size:0.95em">
           <span class="tip"><strong>{{ s.ticker }}</strong><span class="tiptext">{{ s.name }}</span></span>
-          <span style="color:#888">${{ s.price }}</span>
+          <span style="color:#9aa3b5">${{ s.price }}</span>
           {% if s.signal == 'BUY' %}<span style="color:#00c853">▲</span>
-          {% elif s.signal == 'SELL' %}<span style="color:#ff1744">▼</span>
+          {% elif s.signal == 'SELL' %}<span style="color:#ff4d6a">▼</span>
           {% else %}<span style="color:#ffd600">—</span>{% endif %}
         </span>
         {% endfor %}
@@ -674,6 +674,7 @@ HTML = """
           <div class="alloc-legend">
             <span style="color:#448aff">■</span> Stocks {{ stock_pct }}%<br>
             <span style="color:#c084fc">■</span> SPY {{ spy_pct }}%<br>
+            <span style="color:#f050b0">■</span> QQQ {{ qqq_pct }}%<br>
             <span style="color:#ffd600">■</span> Crypto {{ crypto_pct }}%<br>
             <span style="color:#00c853">■</span> Cash {{ cash_pct }}%
           </div>
@@ -691,10 +692,12 @@ HTML = """
       </div>
       <div class="market-item"><h2>📊 S&P 500</h2>
         <div class="val {{ 'green' if market.spy_trend else 'red' }}">
-          {{ '↑ Up' if market.spy_trend else '↓ Down' }}</div></div>
+          {{ '↑ Up' if market.spy_trend else '↓ Down' }}
+          <span style="font-size:0.6em">({{ '+' if market.spy_24h >= 0 else '' }}{{ market.spy_24h }}% 24h)</span></div></div>
       <div class="market-item"><h2>💻 NASDAQ</h2>
         <div class="val {{ 'green' if market.qqq_trend else 'red' }}">
-          {{ '↑ Up' if market.qqq_trend else '↓ Down' }}</div></div>
+          {{ '↑ Up' if market.qqq_trend else '↓ Down' }}
+          <span style="font-size:0.6em">({{ '+' if market.qqq_24h >= 0 else '' }}{{ market.qqq_24h }}% 24h)</span></div></div>
       <div class="market-item"><h2>₿ BITCOIN</h2>
         <div class="val {{ 'green' if market.btc_trend else 'red' }}">
           {{ '↑ Up' if market.btc_trend else '↓ Down' }}</div></div>
@@ -713,7 +716,7 @@ HTML = """
         <h2>📈 PORTFOLIO PERFORMANCE</h2>
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
           <div style="display:flex;background:#252840;border-radius:20px;padding:2px">
-            <div id="pvbtn-24h" style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#888;transition:all 0.2s" onclick="setPortfolioView('24h')">24H</div>
+            <div id="pvbtn-24h" style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#9aa3b5;transition:all 0.2s" onclick="setPortfolioView('24h')">24H</div>
             <div id="pvbtn-7d"  style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;background:#2e3250;color:#fff;transition:all 0.2s" onclick="setPortfolioView('7d')">7D</div>
           </div>
           <div class="chart-toggles">
@@ -741,8 +744,20 @@ HTML = """
         <td>${{ p.current }}</td>
         <td>${{ p.value }}</td>
         <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
-        <td style="color:#f0a500">${{ p.trail_stop }} <span style="color:#555;font-size:0.8em">(5%)</span></td>
-        <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
+        <td style="color:#f0a500">${{ p.trail_stop }} <span style="color:#8c93a6;font-size:0.8em">(5%)</span></td>
+        <td style="color:{{ '#ff6b57' if p.gap_pct|float < 5 else '#9aa3b5' }}">{{ p.gap_pct }}%</td>
+      </tr>
+      {% elif p.is_qqq %}
+      <tr style="background:rgba(240,80,176,0.10)">
+        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
+        <td style="color:#f050b0;font-size:0.8em">🏦 QQQ Default</td>
+        <td>{{ p.qty }} sh</td>
+        <td>${{ p.avg_price }}</td>
+        <td>${{ p.current }}</td>
+        <td>${{ p.value }}</td>
+        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
+        <td style="color:#f0a500">${{ p.trail_stop }} <span style="color:#8c93a6;font-size:0.8em">(7%)</span></td>
+        <td style="color:{{ '#ff6b57' if p.gap_pct|float < 5 else '#9aa3b5' }}">{{ p.gap_pct }}%</td>
       </tr>
       {% else %}
       <tr style="background:rgba(68,138,255,0.07)">
@@ -754,7 +769,7 @@ HTML = """
         <td>${{ p.value }}</td>
         <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
         <td style="color:#f0a500">${{ p.trail_stop }}</td>
-        <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
+        <td style="color:{{ '#ff6b57' if p.gap_pct|float < 5 else '#9aa3b5' }}">{{ p.gap_pct }}%</td>
       </tr>
       {% endif %}
       {% endfor %}
@@ -768,11 +783,11 @@ HTML = """
         <td>${{ p.value }}</td>
         <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
         <td style="color:#f0a500">${{ p.trail_stop }}</td>
-        <td style="color:{{ '#e74c3c' if p.gap_pct|float < 5 else '#888' }}">{{ p.gap_pct }}%</td>
+        <td style="color:{{ '#ff6b57' if p.gap_pct|float < 5 else '#9aa3b5' }}">{{ p.gap_pct }}%</td>
       </tr>
       {% else %}
         {% if not stock_positions %}
-      <tr><td colspan="9" style="padding:20px;text-align:center;color:#888">No open positions</td></tr>
+      <tr><td colspan="9" style="padding:20px;text-align:center;color:#9aa3b5">No open positions</td></tr>
         {% endif %}
       {% endfor %}
     </table></div>
@@ -814,10 +829,10 @@ HTML = """
     <div class="table-scroll"><table>
       <tr><th>TIME</th><th>ASSET</th><th>TYPE</th><th>ACTION</th><th>QTY</th><th>PRICE</th></tr>
       {% for o in orders %}
-      <tr style="background:{{ 'rgba(255,214,0,0.06)' if o.is_crypto else ('rgba(100,181,246,0.10)' if o.symbol == 'SPY' else 'rgba(68,138,255,0.07)') }}">
+      <tr style="background:{{ 'rgba(255,214,0,0.06)' if o.is_crypto else ('rgba(100,181,246,0.10)' if o.symbol == 'SPY' else ('rgba(240,80,176,0.10)' if o.symbol == 'QQQ' else 'rgba(68,138,255,0.07)')) }}">
         <td>{{ o.time }}</td>
         <td><span class="tip"><strong>{{ o.symbol }}</strong><span class="tiptext">{{ o.name }}</span></span></td>
-        <td style="color:{{ '#ffd600' if o.is_crypto else ('#64b5f6' if o.symbol == 'SPY' else '#448aff') }};font-size:0.8em">{{ '🪙 Crypto' if o.is_crypto else ('🏦 SPY Default' if o.symbol == 'SPY' else '📈 Stock') }}</td>
+        <td style="color:{{ '#ffd600' if o.is_crypto else ('#64b5f6' if o.symbol == 'SPY' else ('#f050b0' if o.symbol == 'QQQ' else '#448aff')) }};font-size:0.8em">{{ '🪙 Crypto' if o.is_crypto else ('🏦 SPY Default' if o.symbol == 'SPY' else ('🏦 QQQ Default' if o.symbol == 'QQQ' else '📈 Stock')) }}</td>
         <td>{% if o.side == 'buy' %}<span class="badge buy">BUY</span>
             {% else %}<span class="badge sell">SELL</span>{% endif %}</td>
         <td>{{ o.qty }}</td><td>${{ o.price }}</td>
@@ -877,8 +892,8 @@ HTML = """
     const chartOptions = {
       plugins: { legend: { display: false } },
       scales: {
-        x: { ticks: { color: '#888', maxTicksLimit: 10 }, grid: { color: '#252840' } },
-        y: { ticks: { color: '#888', callback: v => '$' + v.toLocaleString() }, grid: { color: '#252840' } }
+        x: { ticks: { color: '#9aa3b5', maxTicksLimit: 10 }, grid: { color: '#252840' } },
+        y: { ticks: { color: '#9aa3b5', callback: v => '$' + v.toLocaleString() }, grid: { color: '#252840' } }
       }
     };
 
@@ -927,16 +942,16 @@ HTML = """
       ['24h','7d'].forEach(v => {
         const btn = document.getElementById('pvbtn-' + v);
         btn.style.background = v === view ? '#2e3250' : 'transparent';
-        btn.style.color      = v === view ? '#fff' : '#888';
+        btn.style.color      = v === view ? '#fff' : '#9aa3b5';
       });
     }
     {% endif %}
 
     // Donut allocation charts
     const allocData = {
-      labels: ['Stocks', 'SPY Default', 'Crypto', 'Cash'],
-      datasets: [{ data: [{{ stock_pct }}, {{ spy_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
-        backgroundColor: ['#448aff', '#c084fc', '#ffd600', '#00c853'],
+      labels: ['Stocks', 'SPY Default', 'QQQ Default', 'Crypto', 'Cash'],
+      datasets: [{ data: [{{ stock_pct }}, {{ spy_pct }}, {{ qqq_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
+        backgroundColor: ['#448aff', '#c084fc', '#f050b0', '#ffd600', '#00c853'],
         borderWidth: 0, hoverOffset: 6 }]
     };
     const allocOpts = {
@@ -992,7 +1007,7 @@ HTML = """
       const cEl = document.getElementById('nav-crypto-countdown');
       if (sEl) {
         sEl.textContent = sStock < 0 ? 'CLOSED' : fmtCountdown(sStock);
-        sEl.style.color = sStock < 0 ? '#e74c3c' : sStock < 300 ? '#f0a500' : '#00c853';
+        sEl.style.color = sStock < 0 ? '#ff6b57' : sStock < 300 ? '#f0a500' : '#00c853';
       }
       if (cEl) {
         cEl.textContent = fmtCountdown(sCrypto);
@@ -1059,6 +1074,8 @@ def dashboard():
             'spy_trend': int(mkt['SPY_Trend']),
             'qqq_trend': int(mkt['QQQ_Trend']),
             'btc_trend': btc_trend,
+            'spy_24h':   round(float(mkt['SPY_Return']) * 100, 2),
+            'qqq_24h':   round(float(mkt['QQQ_Return']) * 100, 2),
             'spy_5d':    round(float(mkt['SPY_Return_5d']) * 100, 2),
             'qqq_5d':    round(float(mkt['QQQ_Return_5d']) * 100, 2),
         }
@@ -1205,7 +1222,7 @@ def dashboard():
     raw_orders  = api.list_orders(status='all', limit=40)
     crypto_syms = list(CRYPTOS.keys())
     all_orders  = sorted(
-        [o for o in raw_orders if o.symbol in TICKERS or o.symbol in crypto_syms or o.symbol == 'SPY'],
+        [o for o in raw_orders if o.symbol in TICKERS or o.symbol in crypto_syms or o.symbol in ('SPY', 'QQQ')],
         key=lambda o: o.submitted_at or datetime.min, reverse=True
     )[:20]
     orders = [{
@@ -1235,15 +1252,15 @@ def dashboard():
     for p in positions:
         entry    = float(p.avg_entry_price)
         current  = float(p.current_price)
-        is_stock = p.symbol in TICKERS or p.symbol == 'SPY'
+        is_stock = p.symbol in TICKERS or p.symbol in ('SPY', 'QQQ')
         hw_map   = _stock_hw if is_stock else _crypto_hw
-        stop_pct = 0.05 if p.symbol == 'SPY' else (0.12 if is_stock else 0.15)
+        stop_pct = 0.05 if p.symbol == 'SPY' else (0.07 if p.symbol == 'QQQ' else (0.12 if is_stock else 0.15))
         peak     = hw_map.get(p.symbol, entry)
         trail_stop = peak * (1 - stop_pct)
         gap_pct    = (current - trail_stop) / current * 100
         row = {
             'symbol':     p.symbol,
-            'name':       'S&P 500 ETF (default)' if p.symbol == 'SPY' else COMPANY_NAMES.get(p.symbol, p.symbol),
+            'name':       'S&P 500 ETF (default)' if p.symbol == 'SPY' else ('Nasdaq-100 ETF (default)' if p.symbol == 'QQQ' else COMPANY_NAMES.get(p.symbol, p.symbol)),
             'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 6),
             'avg_price':  f"{entry:,.4f}",
             'current':    f"{current:,.4f}",
@@ -1255,6 +1272,7 @@ def dashboard():
             'gap_pct':    f"{gap_pct:.1f}",
             'is_stock':   is_stock,
             'is_spy':     p.symbol == 'SPY',
+            'is_qqq':     p.symbol == 'QQQ',
         }
         if is_stock:
             stock_positions_list.append(row)
@@ -1265,10 +1283,12 @@ def dashboard():
 
     port_val   = float(account.portfolio_value)
     spy_val    = sum(float(p.market_value) for p in positions if p.symbol == 'SPY')
+    qqq_val    = sum(float(p.market_value) for p in positions if p.symbol == 'QQQ')
     stock_val  = sum(float(p.market_value) for p in positions if p.symbol in TICKERS)
-    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS and p.symbol != 'SPY')
-    cash_val   = port_val - spy_val - stock_val - crypto_val
+    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS and p.symbol not in ('SPY', 'QQQ'))
+    cash_val   = port_val - spy_val - qqq_val - stock_val - crypto_val
     spy_pct    = round(spy_val    / port_val * 100, 1) if port_val else 0.0
+    qqq_pct    = round(qqq_val    / port_val * 100, 1) if port_val else 0.0
     stock_pct  = round(stock_val  / port_val * 100, 1) if port_val else 0.0
     crypto_pct = round(crypto_val / port_val * 100, 1) if port_val else 0.0
     cash_pct   = round(cash_val   / port_val * 100, 1) if port_val else 0.0
@@ -1292,6 +1312,7 @@ def dashboard():
         stock_positions=stock_positions_list,
         crypto_positions_list=crypto_positions_list,
         spy_pct=spy_pct,
+        qqq_pct=qqq_pct,
         stock_pct=stock_pct,
         crypto_pct=crypto_pct,
         cash_pct=cash_pct)
@@ -1339,7 +1360,7 @@ MILESTONES_HTML = """
     .summary-card .label { font-size: 0.72em; color: #666; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
     .summary-card .value { font-size: 1.35em; font-weight: 700; }
-    .green { color: #00c853; } .red { color: #ff1744; }
+    .green { color: #00c853; } .red { color: #ff4d6a; }
     .blue  { color: #448aff; } .gold { color: #ffd600; }
     .purple { color: #c084fc; }
 
@@ -1363,7 +1384,7 @@ MILESTONES_HTML = """
     .milestone-date { font-size: 1em; font-weight: 700; color: #448aff; }
     .milestone-val  { font-size: 1.25em; font-weight: 700; }
     .milestone-ret  { font-size: 0.85em; font-weight: 700; margin-left: 10px; }
-    .milestone-notes { font-size: 0.78em; color: #555; margin-top: 4px; }
+    .milestone-notes { font-size: 0.78em; color: #8c93a6; margin-top: 4px; }
 
     .positions-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -1375,18 +1396,19 @@ MILESTONES_HTML = """
     }
     .pos-sym  { font-size: 0.8em; font-weight: 700; color: #e0e6ff; }
     .pos-sym.spy { color: #c084fc; }
+    .pos-sym.qqq { color: #f050b0; }
     .pos-val  { font-size: 0.78em; color: #666; margin-top: 2px; }
     .pos-pl   { font-size: 0.78em; font-weight: 600; margin-top: 1px; }
 
     .model-row {
       display: flex; gap: 16px; flex-wrap: wrap;
-      font-size: 0.78em; color: #555; margin-top: 10px;
+      font-size: 0.78em; color: #8c93a6; margin-top: 10px;
       padding-top: 10px; border-top: 1px solid #1e2540;
     }
-    .model-row span { color: #888; }
+    .model-row span { color: #9aa3b5; }
     .model-row strong { color: #aaa; }
 
-    .empty { text-align: center; color: #555; padding: 60px 20px; font-size: 0.9em; }
+    .empty { text-align: center; color: #8c93a6; padding: 60px 20px; font-size: 0.9em; }
   </style>
 </head>
 <body>
@@ -1432,12 +1454,12 @@ MILESTONES_HTML = """
     {% if sharpe is not none %}
     <div class="value {{ 'green' if sharpe >= 1.0 else ('gold' if sharpe >= 0.5 else 'red') }}">
       {{ sharpe }}
-      <span style="font-size:0.55em;color:#555;font-weight:400">
+      <span style="font-size:0.55em;color:#8c93a6;font-weight:400">
         {{ '★ good' if sharpe >= 1.0 else ('ok' if sharpe >= 0.5 else 'poor') }}
       </span>
     </div>
     {% else %}
-    <div class="value" style="color:#555;font-size:0.9em">need ≥3 weeks</div>
+    <div class="value" style="color:#8c93a6;font-size:0.9em">need ≥3 weeks</div>
     {% endif %}
   </div>
 </div>
@@ -1468,7 +1490,7 @@ MILESTONES_HTML = """
     <div class="positions-grid">
       {% for p in m.positions %}
       <div class="pos-chip">
-        <div class="pos-sym {{ 'spy' if p.symbol == 'SPY' else '' }}">{{ p.symbol }}</div>
+        <div class="pos-sym {{ 'spy' if p.symbol == 'SPY' else ('qqq' if p.symbol == 'QQQ' else '') }}">{{ p.symbol }}</div>
         <div class="pos-val">${{ p.value | format_money }}</div>
         <div class="pos-pl {{ 'green' if p.pl_pct >= 0 else 'red' }}">{{ '+' if p.pl_pct >= 0 else '' }}{{ p.pl_pct }}%</div>
       </div>
@@ -1521,8 +1543,8 @@ new Chart(ctx, {
       tooltip: { callbacks: { label: ctx => '$' + ctx.raw.toLocaleString() } }
     },
     scales: {
-      x: { ticks: { color: '#555', maxRotation: 45 }, grid: { color: '#151825' } },
-      y: { ticks: { color: '#555', callback: v => '$' + v.toLocaleString() }, grid: { color: '#151825' } }
+      x: { ticks: { color: '#8c93a6', maxRotation: 45 }, grid: { color: '#151825' } },
+      y: { ticks: { color: '#8c93a6', callback: v => '$' + v.toLocaleString() }, grid: { color: '#151825' } }
     }
   }
 });

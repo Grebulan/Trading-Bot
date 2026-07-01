@@ -64,6 +64,13 @@ SPY_TRAIL_STOP  = 0.05   # 5% trailing stop — conservative given SPY is majori
 SPY_VIX_CRASH   = 40     # hard sell if VIX spikes above this (sudden crash)
 SPY_MIN_RESERVE = 2000   # always keep this much cash free
 
+# QQQ default position — smaller, capped slice alongside SPY. QQQ has outperformed
+# SPY recently but runs ~50% hotter on volatility, so it gets a minority allocation
+# and a wider trailing stop rather than mirroring SPY's settings outright.
+QQQ_ALLOCATION  = 0.25   # QQQ gets this fraction of spare cash; SPY gets the rest
+QQQ_TRAIL_STOP  = 0.07   # wider than SPY's 5% — QQQ is more volatile
+QQQ_VIX_CRASH   = 40     # hard sell if VIX spikes above this (sudden crash)
+
 HIGHWATER_FILE  = '/home/jv/stock_highwater.json'
 
 def load_highwater():
@@ -108,15 +115,17 @@ def get_market_indicators():
     spy['SPY_Return_5d'] = spy['SPY'].pct_change(5)
     spy['SPY_Regime']    = (spy['SPY'] > spy['SPY_SMA_200']).astype(int)
 
-    qqq = yf.download('QQQ', period="60d", interval="1d", progress=False)
+    qqq = yf.download('QQQ', period="300d", interval="1d", progress=False)
     qqq.columns = [col[0] if isinstance(col, tuple) else col for col in qqq.columns]
     qqq = qqq[['Close']].rename(columns={'Close': 'QQQ'})
     qqq['QQQ_Return']    = qqq['QQQ'].pct_change()
+    qqq['QQQ_SMA_200']   = qqq['QQQ'].rolling(200).mean()
     qqq['QQQ_Trend']     = (qqq['QQQ'].rolling(10).mean() > qqq['QQQ'].rolling(50).mean()).astype(int)
     qqq['QQQ_Return_5d'] = qqq['QQQ'].pct_change(5)
+    qqq['QQQ_Regime']    = (qqq['QQQ'] > qqq['QQQ_SMA_200']).astype(int)
 
     market = vix.join(spy[['SPY_Return','SPY_SMA_10','SPY_SMA_50','SPY_Trend','SPY_Return_5d','SPY_Regime']], how='inner')
-    market = market.join(qqq[['QQQ_Return','QQQ_Trend','QQQ_Return_5d']], how='inner')
+    market = market.join(qqq[['QQQ_Return','QQQ_Trend','QQQ_Return_5d','QQQ_Regime']], how='inner')
     market.dropna(inplace=True)
     row = market.iloc[-1]
     regime_str = '✅ Bull' if row['SPY_Regime'] else '🚫 Bear'
@@ -328,7 +337,8 @@ def run():
                     print(f"  ⏸️  Skipping BUY — high VIX ({float(mkt['VIX']):.1f})")
                     continue
 
-                if len(positions) >= MAX_POSITIONS:
+                stock_position_count = len([s for s in positions if s not in ('SPY', 'QQQ')])
+                if stock_position_count >= MAX_POSITIONS:
                     print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
                     continue
 
@@ -375,30 +385,32 @@ def run():
 
     print(f"\n  📝 Logged {signals_logged} signals")
 
-    # --- SPY default position ---
-    # Holds spare cash when no individual stock signals are firing.
-    # Exits on trailing stop, VIX crash spike, or bear regime.
-    print("\n📊 SPY (default position)")
+    # --- Index default positions (SPY + QQQ) ---
+    # Hold spare cash when no individual stock signals are firing. SPY takes the
+    # majority share of that spare cash; QQQ gets a smaller, capped slice
+    # (QQQ_ALLOCATION) since it runs hotter on volatility. Each exits independently
+    # on its own trailing stop, VIX crash spike, or bear regime (200-day MA).
+    print("\n📊 Index default positions (SPY + QQQ)")
     try:
-        spy_df = get_features('SPY')
-        spy_price = float(spy_df['Close'].iloc[-1])
-        spy_pos   = positions.get('SPY')
-        # Refresh positions in case stock trades above changed cash
+        spy_price = float(get_features('SPY')['Close'].iloc[-1])
+        qqq_price = float(get_features('QQQ')['Close'].iloc[-1])
+
+        # Refresh cash/positions in case the stock-buying loop above changed them
         account   = api.get_account()
         cash      = float(account.cash)
+        positions = {p.symbol: p for p in api.list_positions()}
 
-        # Cancel pending SPY buys; deduct other pending buys from available cash
-        # so SPY doesn't over-commit funds that are already spoken for.
+        # Cancel stale pending SPY/QQQ buys; deduct other pending buys from
+        # available cash so these defaults don't over-commit funds already spoken for.
         open_orders = api.list_orders(status='open')
         pending_spend = 0.0
         for o in open_orders:
-            if o.symbol == 'SPY' and o.side == 'buy':
+            if o.symbol in ('SPY', 'QQQ') and o.side == 'buy':
                 api.cancel_order(o.id)
-                print(f"  🗑️  Cancelled stale pending SPY buy order ({o.id[:8]}...)")
+                print(f"  🗑️  Cancelled stale pending {o.symbol} buy order ({o.id[:8]}...)")
             elif o.side == 'buy':
                 try:
-                    o_df = get_features(o.symbol)
-                    o_price = float(o_df['Close'].iloc[-1])
+                    o_price = float(get_features(o.symbol)['Close'].iloc[-1])
                 except Exception:
                     o_price = 0.0
                 pending_spend += float(o.qty) * o_price
@@ -406,67 +418,69 @@ def run():
             print(f"  ⚠️  Pending buy orders: ${pending_spend:,.2f} — deducting from available cash")
         cash -= pending_spend
 
-        if spy_pos:
-            entry      = float(spy_pos.avg_entry_price)
-            spy_qty    = float(spy_pos.qty)
-            pnl_pct    = (spy_price - entry) / entry
-            peak       = hw.get('SPY', entry)
-            if spy_price > peak:
-                hw['SPY'] = spy_price
-                peak      = spy_price
-                save_highwater(hw)
-            trail_pct  = (spy_price - peak) / peak
-            trail_stop = peak * (1 - SPY_TRAIL_STOP)
-            print(f"  Holding {spy_qty:.4f} shares, entry ${entry:,.2f}, P&L {pnl_pct:+.1%} | Trail stop ${trail_stop:,.2f}")
+        available  = cash - SPY_MIN_RESERVE
+        spy_budget = max(available * (1 - QQQ_ALLOCATION), 0)
+        qqq_budget = max(available * QQQ_ALLOCATION, 0)
+        vix_now    = float(mkt['VIX'])
 
-            vix_now     = float(mkt['VIX'])
-            bear_regime = not mkt['SPY_Regime']
+        def manage_default(symbol, price, budget, trail_stop_pct, vix_crash, bear_regime):
+            print(f"\n  {symbol}:")
 
-            if trail_pct <= -SPY_TRAIL_STOP:
-                print(f"  🛑 SPY trailing stop — {trail_pct:.1%} from peak ${peak:,.2f}")
-                api.submit_order(symbol='SPY', qty=spy_qty, side='sell',
-                                 type='market', time_in_force='day')
-                if 'SPY' in hw:
-                    del hw['SPY']
-                    save_highwater(hw)
-            elif vix_now > SPY_VIX_CRASH:
-                print(f"  🚨 SPY crash exit — VIX={vix_now:.1f} above crash threshold ({SPY_VIX_CRASH})")
-                api.submit_order(symbol='SPY', qty=spy_qty, side='sell',
-                                 type='market', time_in_force='day')
-                if 'SPY' in hw:
-                    del hw['SPY']
-                    save_highwater(hw)
-            elif bear_regime:
-                print(f"  🚫 SPY bear regime exit — SPY below 200-day MA")
-                api.submit_order(symbol='SPY', qty=spy_qty, side='sell',
-                                 type='market', time_in_force='day')
-                if 'SPY' in hw:
-                    del hw['SPY']
-                    save_highwater(hw)
-            else:
-                print(f"  ✅ Holding — no exit conditions triggered")
-
-        else:
-            # Buy SPY with spare cash if conditions are favourable.
-            # Use GTC so the order carries to next open if placed near/after close.
-            available = cash - SPY_MIN_RESERVE
-            if available < 1000:
-                print(f"  ⏸️  Skipping — insufficient spare cash (${cash:,.2f})")
-            elif not mkt['SPY_Regime']:
-                print(f"  ⏸️  Skipping — bear regime (SPY below 200-day MA)")
-            elif float(mkt['VIX']) > SPY_VIX_CRASH:
-                print(f"  ⏸️  Skipping — VIX too high ({float(mkt['VIX']):.1f})")
-            else:
-                qty = int(available / spy_price)  # whole shares only — no fractional restriction
-                if qty < 1:
-                    print(f"  ⏸️  Skipping — insufficient cash for 1 share (${available:,.2f} < ${spy_price:,.2f})")
+            def try_buy():
+                if budget < 1000:
+                    print(f"    ⏸️  Skipping buy — insufficient spare cash (${budget:,.2f})")
+                elif bear_regime:
+                    print(f"    ⏸️  Skipping buy — bear regime ({symbol} below 200-day MA)")
+                elif vix_now > vix_crash:
+                    print(f"    ⏸️  Skipping buy — VIX too high ({vix_now:.1f})")
                 else:
-                    print(f"  ✅ BUY {qty} SPY @ ${spy_price:.2f} = ${qty * spy_price:,.2f} (spare cash)")
-                    api.submit_order(symbol='SPY', qty=qty, side='buy',
-                                     type='market', time_in_force='day')
+                    qty = int(budget / price)  # whole shares only — no fractional restriction
+                    if qty < 1:
+                        print(f"    ⏸️  Skipping buy — insufficient cash for 1 share (${budget:,.2f} < ${price:,.2f})")
+                    else:
+                        print(f"    ✅ BUY {qty} {symbol} @ ${price:.2f} = ${qty * price:,.2f} (spare cash)")
+                        api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
+
+            pos = positions.get(symbol)
+            if pos:
+                entry   = float(pos.avg_entry_price)
+                qty     = float(pos.qty)
+                pnl_pct = (price - entry) / entry
+                peak    = hw.get(symbol, entry)
+                if price > peak:
+                    hw[symbol] = price
+                    peak       = price
+                    save_highwater(hw)
+                trail_pct  = (price - peak) / peak
+                trail_stop = peak * (1 - trail_stop_pct)
+                print(f"    Holding {qty:.4f} shares, entry ${entry:,.2f}, P&L {pnl_pct:+.1%} | Trail stop ${trail_stop:,.2f}")
+
+                if trail_pct <= -trail_stop_pct:
+                    print(f"    🛑 Trailing stop — {trail_pct:.1%} from peak ${peak:,.2f}")
+                    api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='day')
+                    hw.pop(symbol, None)
+                    save_highwater(hw)
+                elif vix_now > vix_crash:
+                    print(f"    🚨 Crash exit — VIX={vix_now:.1f} above crash threshold ({vix_crash})")
+                    api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='day')
+                    hw.pop(symbol, None)
+                    save_highwater(hw)
+                elif bear_regime:
+                    print(f"    🚫 Bear regime exit — {symbol} below 200-day MA")
+                    api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='day')
+                    hw.pop(symbol, None)
+                    save_highwater(hw)
+                else:
+                    print(f"    ✅ Holding — no exit conditions triggered")
+                    try_buy()  # top up with any newly freed spare cash
+            else:
+                try_buy()
+
+        manage_default('SPY', spy_price, spy_budget, SPY_TRAIL_STOP, SPY_VIX_CRASH, not mkt['SPY_Regime'])
+        manage_default('QQQ', qqq_price, qqq_budget, QQQ_TRAIL_STOP, QQQ_VIX_CRASH, not mkt['QQQ_Regime'])
 
     except Exception as e:
-        print(f"  ❌ SPY error: {e}")
+        print(f"  ❌ Index default position error: {e}")
 
     print("=" * 50)
     print("✅ Done!")
