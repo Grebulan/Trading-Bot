@@ -31,26 +31,24 @@ BASE_URL = "https://paper-api.alpaca.markets"
 api      = tradeapi.REST(ENV['ALPACA_KEY'], ENV['ALPACA_SECRET'], BASE_URL, api_version='v2')
 
 TICKERS = [
-    'AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD',  # Tech
-    'NVDA','AMD','QCOM','ARM',                            # Semiconductors
+    'AAPL','GOOGL','AMZN','PLTR','CRWD',                  # Tech
+    'NVDA','AMD','QCOM','ARM','MU',                       # Semiconductors
     'TSLA','SHOP','COIN',                                 # Growth
-    'JPM','BAC','GS','MS',                               # Finance
-    'TGT',                                                # Retail
+    'JPM','BAC','GS','MS','STT',                         # Finance
     'OXY',                                                # Energy
     'GOLD',                                               # Commodities
     'UNH','ISRG',                                         # Healthcare
-    'CAT',                                                # Industrials
+    'CAT','VRT',                                          # Industrials
 ]
 SECTORS = {
-    'Tech':       ['AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD'],
-    'Semi':       ['NVDA','AMD','QCOM','ARM'],
+    'Tech':       ['AAPL','GOOGL','AMZN','PLTR','CRWD'],
+    'Semi':       ['NVDA','AMD','QCOM','ARM','MU'],
     'Growth':     ['TSLA','SHOP','COIN'],
-    'Finance':    ['JPM','BAC','GS','MS'],
-    'Retail':     ['TGT'],
+    'Finance':    ['JPM','BAC','GS','MS','STT'],
     'Energy':     ['OXY'],
     'Commodities':['GOLD'],
     'Healthcare': ['UNH','ISRG'],
-    'Industrial': ['CAT'],
+    'Industrial': ['CAT','VRT'],
 }
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
@@ -63,13 +61,6 @@ VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
 SPY_TRAIL_STOP  = 0.05   # 5% trailing stop — conservative given SPY is majority of portfolio
 SPY_VIX_CRASH   = 40     # hard sell if VIX spikes above this (sudden crash)
 SPY_MIN_RESERVE = 2000   # always keep this much cash free
-
-# QQQ default position — smaller, capped slice alongside SPY. QQQ has outperformed
-# SPY recently but runs ~50% hotter on volatility, so it gets a minority allocation
-# and a wider trailing stop rather than mirroring SPY's settings outright.
-QQQ_ALLOCATION  = 0.25   # QQQ gets this fraction of spare cash; SPY gets the rest
-QQQ_TRAIL_STOP  = 0.07   # wider than SPY's 5% — QQQ is more volatile
-QQQ_VIX_CRASH   = 40     # hard sell if VIX spikes above this (sudden crash)
 
 HIGHWATER_FILE  = '/home/jv/stock_highwater.json'
 
@@ -337,7 +328,7 @@ def run():
                     print(f"  ⏸️  Skipping BUY — high VIX ({float(mkt['VIX']):.1f})")
                     continue
 
-                stock_position_count = len([s for s in positions if s not in ('SPY', 'QQQ')])
+                stock_position_count = len([s for s in positions if s != 'SPY'])
                 if stock_position_count >= MAX_POSITIONS:
                     print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
                     continue
@@ -385,27 +376,24 @@ def run():
 
     print(f"\n  📝 Logged {signals_logged} signals")
 
-    # --- Index default positions (SPY + QQQ) ---
-    # Hold spare cash when no individual stock signals are firing. SPY takes the
-    # majority share of that spare cash; QQQ gets a smaller, capped slice
-    # (QQQ_ALLOCATION) since it runs hotter on volatility. Each exits independently
-    # on its own trailing stop, VIX crash spike, or bear regime (200-day MA).
-    print("\n📊 Index default positions (SPY + QQQ)")
+    # --- Index default position (SPY) ---
+    # Hold spare cash when no individual stock signals are firing. Exits on
+    # its own trailing stop, VIX crash spike, or bear regime (200-day MA).
+    print("\n📊 Index default position (SPY)")
     try:
         spy_price = float(get_features('SPY')['Close'].iloc[-1])
-        qqq_price = float(get_features('QQQ')['Close'].iloc[-1])
 
         # Refresh cash/positions in case the stock-buying loop above changed them
         account   = api.get_account()
         cash      = float(account.cash)
         positions = {p.symbol: p for p in api.list_positions()}
 
-        # Cancel stale pending SPY/QQQ buys; deduct other pending buys from
-        # available cash so these defaults don't over-commit funds already spoken for.
+        # Cancel stale pending SPY buys; deduct other pending buys from
+        # available cash so this default doesn't over-commit funds already spoken for.
         open_orders = api.list_orders(status='open')
         pending_spend = 0.0
         for o in open_orders:
-            if o.symbol in ('SPY', 'QQQ') and o.side == 'buy':
+            if o.symbol == 'SPY' and o.side == 'buy':
                 api.cancel_order(o.id)
                 print(f"  🗑️  Cancelled stale pending {o.symbol} buy order ({o.id[:8]}...)")
             elif o.side == 'buy':
@@ -419,8 +407,7 @@ def run():
         cash -= pending_spend
 
         available  = cash - SPY_MIN_RESERVE
-        spy_budget = max(available * (1 - QQQ_ALLOCATION), 0)
-        qqq_budget = max(available * QQQ_ALLOCATION, 0)
+        spy_budget = max(available, 0)
         vix_now    = float(mkt['VIX'])
 
         def manage_default(symbol, price, budget, trail_stop_pct, vix_crash, bear_regime):
@@ -477,7 +464,6 @@ def run():
                 try_buy()
 
         manage_default('SPY', spy_price, spy_budget, SPY_TRAIL_STOP, SPY_VIX_CRASH, not mkt['SPY_Regime'])
-        manage_default('QQQ', qqq_price, qqq_budget, QQQ_TRAIL_STOP, QQQ_VIX_CRASH, not mkt['QQQ_Regime'])
 
     except Exception as e:
         print(f"  ❌ Index default position error: {e}")

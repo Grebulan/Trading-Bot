@@ -1,5 +1,20 @@
+import json
+import time
 import yfinance as yf
 from transformers import pipeline
+
+CACHE_FILE = '/home/jv/stock_sentiment_cache.json'
+
+TICKERS = [
+    'AAPL','GOOGL','AMZN','PLTR','CRWD',
+    'NVDA','AMD','QCOM','ARM','MU',
+    'TSLA','SHOP','COIN',
+    'JPM','BAC','GS','MS','STT',
+    'OXY',
+    'GOLD',
+    'UNH','ISRG',
+    'CAT','VRT',
+]
 
 _finbert = None
 
@@ -50,3 +65,14 @@ def get_sentiment(ticker):
     except Exception as e:
         print(f"  📰 {ticker}: Sentiment error ({e})")
         return 0.0
+
+def refresh_all_sentiment():
+    """Fetch fresh sentiment for every stock ticker and write the cache."""
+    cache = {}
+    now   = time.time()
+    for ticker in TICKERS:
+        score = get_sentiment(ticker)
+        cache[ticker] = {'score': score, 'fetched': now}
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+    return cache

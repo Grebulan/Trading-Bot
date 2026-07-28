@@ -2,7 +2,6 @@ import json
 import os
 import time
 import joblib
-import threading
 import pandas as pd
 import yfinance as yf
 import alpaca_trade_api as tradeapi
@@ -10,7 +9,6 @@ from datetime import datetime
 from flask import Flask, render_template_string, request, Response, session, redirect, url_for
 import functools
 import secrets
-from sentiment import get_sentiment  # used only in background refresh thread
 
 
 app = Flask(__name__)
@@ -211,19 +209,6 @@ def get_stock_sentiment_cached(ticker):
         return entry['score']
     return None   # None = no fresh data (show — rather than 0.0)
 
-def refresh_stock_sentiment_cache():
-    """Fetch fresh sentiment for all stock tickers and write cache.
-    Called in a background thread so it never blocks a request."""
-    cache = {}
-    for ticker in TICKERS:
-        try:
-            score = get_sentiment(ticker)
-            cache[ticker] = {'score': score, 'fetched': time.time()}
-        except Exception:
-            cache[ticker] = {'score': 0.0, 'fetched': time.time()}
-    with open(STOCK_SENTIMENT_CACHE, 'w') as f:
-        json.dump(cache, f)
-
 def get_crypto_sentiment_cached(symbol):
     """Read the existing crypto sentiment cache directly — no live call."""
     try:
@@ -250,21 +235,18 @@ def load_env():
 ENV      = load_env()
 BASE_URL = "https://paper-api.alpaca.markets"
 TICKERS  = [
-    'AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD',  # Tech
-    'NVDA','AMD','QCOM','ARM',                            # Semiconductors
+    'AAPL','GOOGL','AMZN','PLTR','CRWD',                  # Tech
+    'NVDA','AMD','QCOM','ARM','MU',                       # Semiconductors
     'TSLA','SHOP','COIN',                                 # Growth
-    'JPM','BAC','GS','MS',                               # Finance
-    'TGT',                                                # Retail
+    'JPM','BAC','GS','MS','STT',                         # Finance
     'OXY',                                                # Energy
     'GOLD',                                               # Commodities
     'UNH','ISRG',                                         # Healthcare
-    'CAT',                                                # Industrials
+    'CAT','VRT',                                          # Industrials
 ]
 COMPANY_NAMES = {
     'AAPL':     'Apple Inc.',
     'GOOGL':    'Alphabet (Google)',
-    'MSFT':     'Microsoft',
-    'META':     'Meta Platforms (Facebook)',
     'AMZN':     'Amazon',
     'PLTR':     'Palantir Technologies',
     'CRWD':     'CrowdStrike Holdings',
@@ -272,6 +254,7 @@ COMPANY_NAMES = {
     'AMD':      'Advanced Micro Devices',
     'QCOM':     'Qualcomm',
     'ARM':      'Arm Holdings',
+    'MU':       'Micron Technology',
     'TSLA':     'Tesla',
     'SHOP':     'Shopify',
     'COIN':     'Coinbase Global',
@@ -279,12 +262,13 @@ COMPANY_NAMES = {
     'BAC':      'Bank of America',
     'GS':       'Goldman Sachs',
     'MS':       'Morgan Stanley',
-    'TGT':      'Target',
+    'STT':      'State Street Corporation',
     'OXY':      'Occidental Petroleum',
     'GOLD':     'Barrick Gold',
     'UNH':      'UnitedHealth Group',
     'ISRG':     'Intuitive Surgical',
     'CAT':      'Caterpillar Inc.',
+    'VRT':      'Vertiv Holdings',
     'BTC/USD':  'Bitcoin',
     'ETH/USD':  'Ethereum',
     'SOL/USD':  'Solana',
@@ -309,15 +293,14 @@ CRYPTOS  = {
     'ADA/USD':  'ADA-USD',
 }
 SECTORS = {
-    'Tech':       ['AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD'],
-    'Semi':       ['NVDA','AMD','QCOM','ARM'],
+    'Tech':       ['AAPL','GOOGL','AMZN','PLTR','CRWD'],
+    'Semi':       ['NVDA','AMD','QCOM','ARM','MU'],
     'Growth':     ['TSLA','SHOP','COIN'],
-    'Finance':    ['JPM','BAC','GS','MS'],
-    'Retail':     ['TGT'],
+    'Finance':    ['JPM','BAC','GS','MS','STT'],
     'Energy':     ['OXY'],
     'Commodities':['GOLD'],
     'Healthcare': ['UNH','ISRG'],
-    'Industrial': ['CAT'],
+    'Industrial': ['CAT','VRT'],
 }
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
@@ -674,7 +657,6 @@ HTML = """
           <div class="alloc-legend">
             <span style="color:#448aff">■</span> Stocks {{ stock_pct }}%<br>
             <span style="color:#c084fc">■</span> SPY {{ spy_pct }}%<br>
-            <span style="color:#f050b0">■</span> QQQ {{ qqq_pct }}%<br>
             <span style="color:#ffd600">■</span> Crypto {{ crypto_pct }}%<br>
             <span style="color:#00c853">■</span> Cash {{ cash_pct }}%
           </div>
@@ -745,18 +727,6 @@ HTML = """
         <td>${{ p.value }}</td>
         <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
         <td style="color:#f0a500">${{ p.trail_stop }} <span style="color:#8c93a6;font-size:0.8em">(5%)</span></td>
-        <td style="color:{{ '#ff6b57' if p.gap_pct|float < 5 else '#9aa3b5' }}">{{ p.gap_pct }}%</td>
-      </tr>
-      {% elif p.is_qqq %}
-      <tr style="background:rgba(240,80,176,0.10)">
-        <td><span class="tip"><strong>{{ p.symbol }}</strong><span class="tiptext">{{ p.name }}</span></span></td>
-        <td style="color:#f050b0;font-size:0.8em">🏦 QQQ Default</td>
-        <td>{{ p.qty }} sh</td>
-        <td>${{ p.avg_price }}</td>
-        <td>${{ p.current }}</td>
-        <td>${{ p.value }}</td>
-        <td class="{{ 'green' if p.pl >= 0 else 'red' }}">{{ '▲' if p.pl >= 0 else '▼' }} ${{ p.pl_abs }} ({{ p.pl_pct }}%)</td>
-        <td style="color:#f0a500">${{ p.trail_stop }} <span style="color:#8c93a6;font-size:0.8em">(7%)</span></td>
         <td style="color:{{ '#ff6b57' if p.gap_pct|float < 5 else '#9aa3b5' }}">{{ p.gap_pct }}%</td>
       </tr>
       {% else %}
@@ -949,9 +919,9 @@ HTML = """
 
     // Donut allocation charts
     const allocData = {
-      labels: ['Stocks', 'SPY Default', 'QQQ Default', 'Crypto', 'Cash'],
-      datasets: [{ data: [{{ stock_pct }}, {{ spy_pct }}, {{ qqq_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
-        backgroundColor: ['#448aff', '#c084fc', '#f050b0', '#ffd600', '#00c853'],
+      labels: ['Stocks', 'SPY Default', 'Crypto', 'Cash'],
+      datasets: [{ data: [{{ stock_pct }}, {{ spy_pct }}, {{ crypto_pct }}, {{ cash_pct }}],
+        backgroundColor: ['#448aff', '#c084fc', '#ffd600', '#00c853'],
         borderWidth: 0, hoverOffset: 6 }]
     };
     const allocOpts = {
@@ -1252,15 +1222,15 @@ def dashboard():
     for p in positions:
         entry    = float(p.avg_entry_price)
         current  = float(p.current_price)
-        is_stock = p.symbol in TICKERS or p.symbol in ('SPY', 'QQQ')
+        is_stock = p.symbol in TICKERS or p.symbol == 'SPY'
         hw_map   = _stock_hw if is_stock else _crypto_hw
-        stop_pct = 0.05 if p.symbol == 'SPY' else (0.07 if p.symbol == 'QQQ' else (0.12 if is_stock else 0.15))
+        stop_pct = 0.05 if p.symbol == 'SPY' else (0.12 if is_stock else 0.15)
         peak     = hw_map.get(p.symbol, entry)
         trail_stop = peak * (1 - stop_pct)
         gap_pct    = (current - trail_stop) / current * 100
         row = {
             'symbol':     p.symbol,
-            'name':       'S&P 500 ETF (default)' if p.symbol == 'SPY' else ('Nasdaq-100 ETF (default)' if p.symbol == 'QQQ' else COMPANY_NAMES.get(p.symbol, p.symbol)),
+            'name':       'S&P 500 ETF (default)' if p.symbol == 'SPY' else COMPANY_NAMES.get(p.symbol, p.symbol),
             'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 6),
             'avg_price':  f"{entry:,.4f}",
             'current':    f"{current:,.4f}",
@@ -1272,7 +1242,6 @@ def dashboard():
             'gap_pct':    f"{gap_pct:.1f}",
             'is_stock':   is_stock,
             'is_spy':     p.symbol == 'SPY',
-            'is_qqq':     p.symbol == 'QQQ',
         }
         if is_stock:
             stock_positions_list.append(row)
@@ -1283,12 +1252,10 @@ def dashboard():
 
     port_val   = float(account.portfolio_value)
     spy_val    = sum(float(p.market_value) for p in positions if p.symbol == 'SPY')
-    qqq_val    = sum(float(p.market_value) for p in positions if p.symbol == 'QQQ')
     stock_val  = sum(float(p.market_value) for p in positions if p.symbol in TICKERS)
-    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS and p.symbol not in ('SPY', 'QQQ'))
-    cash_val   = port_val - spy_val - qqq_val - stock_val - crypto_val
+    crypto_val = sum(float(p.market_value) for p in positions if p.symbol not in TICKERS and p.symbol != 'SPY')
+    cash_val   = port_val - spy_val - stock_val - crypto_val
     spy_pct    = round(spy_val    / port_val * 100, 1) if port_val else 0.0
-    qqq_pct    = round(qqq_val    / port_val * 100, 1) if port_val else 0.0
     stock_pct  = round(stock_val  / port_val * 100, 1) if port_val else 0.0
     crypto_pct = round(crypto_val / port_val * 100, 1) if port_val else 0.0
     cash_pct   = round(cash_val   / port_val * 100, 1) if port_val else 0.0
@@ -1312,7 +1279,6 @@ def dashboard():
         stock_positions=stock_positions_list,
         crypto_positions_list=crypto_positions_list,
         spy_pct=spy_pct,
-        qqq_pct=qqq_pct,
         stock_pct=stock_pct,
         crypto_pct=crypto_pct,
         cash_pct=cash_pct)

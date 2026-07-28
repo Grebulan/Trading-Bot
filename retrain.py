@@ -56,15 +56,14 @@ def make_exit_label(df, take_profit, stop_loss, max_bars):
     return pd.Series(labels, index=df.index)
 
 STOCK_TICKERS = [
-    'AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD',  # Tech
-    'NVDA','AMD','QCOM','ARM',                            # Semiconductors
+    'AAPL','GOOGL','AMZN','PLTR','CRWD',                  # Tech
+    'NVDA','AMD','QCOM','ARM','MU',                       # Semiconductors
     'TSLA','SHOP','COIN',                                 # Growth
-    'JPM','BAC','GS','MS',                               # Finance
-    'TGT',                                                # Retail
+    'JPM','BAC','GS','MS','STT',                         # Finance
     'OXY',                                                # Energy
     'GOLD',                                               # Commodities
     'UNH','ISRG',                                         # Healthcare
-    'CAT',                                                # Industrials
+    'CAT','VRT',                                          # Industrials
 ]
 
 CRYPTOS = {
@@ -81,15 +80,14 @@ CRYPTOS = {
 }
 
 SECTORS = {
-    'Tech':       ['AAPL','GOOGL','MSFT','META','AMZN','PLTR','CRWD'],
-    'Semi':       ['NVDA','AMD','QCOM','ARM'],
+    'Tech':       ['AAPL','GOOGL','AMZN','PLTR','CRWD'],
+    'Semi':       ['NVDA','AMD','QCOM','ARM','MU'],
     'Growth':     ['TSLA','SHOP','COIN'],
-    'Finance':    ['JPM','BAC','GS','MS'],
-    'Retail':     ['TGT'],
+    'Finance':    ['JPM','BAC','GS','MS','STT'],
     'Energy':     ['OXY'],
     'Commodities':['GOLD'],
     'Healthcare': ['UNH','ISRG'],
-    'Industrial': ['CAT'],
+    'Industrial': ['CAT','VRT'],
 }
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
