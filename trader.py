@@ -53,6 +53,7 @@ SECTORS = {
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
 STOP_LOSS       = 0.12   # 12% trailing — moves up with price
+HARD_STOP       = 0.06   # 6% hard stop from entry — catches decliners that never set a higher peak for the trailing stop to work off
 TAKE_PROFIT     = 0.20   # 20% — let winners run for weeks
 MAX_POSITIONS   = 8      # max simultaneous stock positions (excludes SPY)
 VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
@@ -213,7 +214,8 @@ def log_signal(symbol, signal, confidence, sentiment, price, acted, reason):
 def run():
     account = api.get_account()
     cash    = float(account.cash)
-    print(f"💰 Cash: ${cash:,.2f}")
+    equity  = float(account.equity)
+    print(f"💰 Cash: ${cash:,.2f}  |  Equity: ${equity:,.2f}")
 
     mkt = get_market_indicators()
 
@@ -233,6 +235,7 @@ def run():
             all_returns[ticker] = {'latest': 0.0, '5d': 0.0}
 
     positions = {p.symbol: p for p in api.list_positions()}
+    stock_position_count = len([s for s in positions if s != 'SPY'])
     signals_logged = 0
 
     hw = load_highwater()
@@ -291,12 +294,25 @@ def run():
                 locked_pct = (peak - entry_price) / entry_price
                 print(f"  Position: {float(pos.qty):.4f} shares, entry ${entry_price:,.2f}, P&L {pnl_pct:+.1%} | Peak ${peak:,.2f} (+{locked_pct:.1%}) | Trail stop ${trail_stop:,.2f}")
 
+                if pnl_pct <= -HARD_STOP:
+                    print(f"  🛑 Hard stop — {pnl_pct:.1%} from entry ${entry_price:,.2f}")
+                    api.submit_order(symbol=ticker, qty=float(pos.qty),
+                                     side='sell', type='market', time_in_force='day')
+                    log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'hard_stop')
+                    signals_logged += 1
+                    stock_position_count -= 1
+                    if ticker in hw:
+                        del hw[ticker]
+                        save_highwater(hw)
+                    continue
+
                 if trail_pct <= -STOP_LOSS:
                     print(f"  🛑 Trailing stop — {trail_pct:.1%} from peak ${peak:,.2f} (locked {locked_pct:+.1%})")
                     api.submit_order(symbol=ticker, qty=float(pos.qty),
                                      side='sell', type='market', time_in_force='day')
                     log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'trailing_stop')
                     signals_logged += 1
+                    stock_position_count -= 1
                     if ticker in hw:
                         del hw[ticker]
                         save_highwater(hw)
@@ -308,6 +324,7 @@ def run():
                                      side='sell', type='market', time_in_force='day')
                     log_signal(ticker, 'SELL', conf, sent_score, current_price, True, 'take_profit')
                     signals_logged += 1
+                    stock_position_count -= 1
                     if ticker in hw:
                         del hw[ticker]
                         save_highwater(hw)
@@ -328,7 +345,6 @@ def run():
                     print(f"  ⏸️  Skipping BUY — high VIX ({float(mkt['VIX']):.1f})")
                     continue
 
-                stock_position_count = len([s for s in positions if s != 'SPY'])
                 if stock_position_count >= MAX_POSITIONS:
                     print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
                     continue
@@ -343,7 +359,7 @@ def run():
                     print(f"  ⏸️  Skipping BUY — insufficient cash (${cash:,.2f})")
                     continue
 
-                position_size = min(cash * 0.08, cash - 100)
+                position_size = min(equity * 0.08, cash - 100)
                 fractionable  = is_fractionable(ticker)
 
                 if fractionable:
@@ -363,6 +379,7 @@ def run():
                 api.submit_order(symbol=ticker, qty=qty, side='buy',
                                  type='market', time_in_force='day')
                 cash -= cost
+                stock_position_count += 1
                 log_signal(ticker, 'BUY', conf, sent_score, current_price, True, 'ml_signal')
                 signals_logged += 1
             else:
