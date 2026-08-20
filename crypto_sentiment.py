@@ -1,18 +1,22 @@
 import os
 import json
 import time
+import fcntl
 import requests
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from transformers import pipeline
 
 _finbert = None
+FINBERT_LOCK_FILE = '/tmp/finbert_load.lock'
 
 def get_finbert():
     global _finbert
     if _finbert is None:
-        _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
-                            tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
+        with open(FINBERT_LOCK_FILE, 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
+                                tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
     return _finbert
 
 def score_headlines(headlines):

@@ -83,6 +83,14 @@ def requires_auth(f):
 STOCK_SENTIMENT_CACHE = '/home/jv/stock_sentiment_cache.json'
 STOCK_SENTIMENT_TTL   = 3600  # 1 hour
 
+def fmt_qty(q):
+    """Format a share/coin quantity: whole numbers stay bare, fractional
+    quantities show up to 2 decimal places with trailing zeros trimmed."""
+    r = round(float(q), 2)
+    if r == int(r):
+        return str(int(r))
+    return f"{r:.2f}".rstrip('0').rstrip('.')
+
 def load_stock_sentiment_cache():
     if os.path.exists(STOCK_SENTIMENT_CACHE):
         with open(STOCK_SENTIMENT_CACHE) as f:
@@ -172,6 +180,7 @@ def build_chart_views(history_file='/home/jv/portfolio_history.json'):
     def make_view(data):
         return {
             'labels':       [fmt_label(r) for r in data],
+            'timestamps':   [int(r['dt'].timestamp() * 1000) for r in data],
             'values':       [r['value']  for r in data],
             'stock_values': [r['stock']  for r in data],
             'crypto_values':[r['crypto'] for r in data],
@@ -813,11 +822,21 @@ HTML = """
 
   <script>
     {% if chart_labels %}
-    const labels       = {{ chart_labels | safe }};
+    const timestamps   = {{ chart_timestamps | safe }};
     const valTotal     = {{ chart_values | safe }};
     const valStocks    = {{ chart_stock_values | safe }};
     const valCrypto    = {{ chart_crypto_values | safe }};
     const valCash      = {{ chart_cash_values | safe }};
+
+    // Pair each value series with its real timestamp so gaps in data
+    // collection (e.g. downtime) show as proportional gaps on the axis,
+    // instead of being silently compressed like a category scale would.
+    function toXY(ts, vals) { return vals.map((v, i) => ({ x: ts[i], y: v })); }
+    function fmtAxisDate(ms) {
+      const d = new Date(ms);
+      return d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' }) + ' ' +
+             d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    }
 
     // Shade non-trading periods (outside Mon-Fri 14:30-21:00 UK time)
     const tradingHoursPlugin = {
@@ -825,24 +844,20 @@ HTML = """
       beforeDraw(chart) {
         const { ctx, chartArea, scales } = chart;
         const xScale = scales.x;
-        const lbls = chart.data.labels;
-        if (!lbls || !lbls.length) return;
-        const year = new Date().getFullYear();
-        function isTrading(label) {
-          const [datePart, timePart] = label.split(' ');
-          const [day, month] = datePart.split('/').map(Number);
-          const [hour, minute] = timePart.split(':').map(Number);
-          const date = new Date(year, month - 1, day, hour, minute);
+        const pts = chart.data.datasets[0].data;
+        if (!pts || !pts.length) return;
+        function isTrading(ms) {
+          const date = new Date(ms);
           const dow = date.getDay();
           if (dow === 0 || dow === 6) return false;
-          const mins = hour * 60 + minute;
+          const mins = date.getHours() * 60 + date.getMinutes();
           return mins >= 14 * 60 + 30 && mins < 21 * 60;
         }
         ctx.save();
         let tradingStart = null;
-        lbls.forEach((label, i) => {
-          const trading = isTrading(label);
-          const x = xScale.getPixelForValue(i);
+        pts.forEach((pt) => {
+          const trading = isTrading(pt.x);
+          const x = xScale.getPixelForValue(pt.x);
           if (trading && tradingStart === null) {
             tradingStart = x;
           } else if (!trading && tradingStart !== null) {
@@ -860,9 +875,13 @@ HTML = """
     };
 
     const chartOptions = {
-      plugins: { legend: { display: false } },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: items => fmtAxisDate(items[0].parsed.x) } }
+      },
       scales: {
-        x: { ticks: { color: '#9aa3b5', maxTicksLimit: 10 }, grid: { color: '#252840' } },
+        x: { type: 'linear', min: timestamps[0], max: timestamps[timestamps.length - 1],
+             ticks: { color: '#9aa3b5', maxTicksLimit: 10, callback: fmtAxisDate }, grid: { color: '#252840' } },
         y: { ticks: { color: '#9aa3b5', callback: v => '$' + v.toLocaleString() }, grid: { color: '#252840' } }
       }
     };
@@ -874,18 +893,17 @@ HTML = """
       type: 'line',
       plugins: [tradingHoursPlugin],
       data: {
-        labels: labels,
         datasets: [
-          { label: 'Total ($)',  data: valTotal,  borderColor: '#00c853',
+          { label: 'Total ($)',  data: toXY(timestamps, valTotal),  borderColor: '#00c853',
             backgroundColor: 'rgba(0,200,83,0.08)', borderWidth: 2,
             pointRadius: ptRadius, fill: true, tension: 0.3, hidden: false },
-          { label: 'Stocks ($)', data: valStocks, borderColor: '#448aff',
+          { label: 'Stocks ($)', data: toXY(timestamps, valStocks), borderColor: '#448aff',
             backgroundColor: 'rgba(68,138,255,0.05)', borderWidth: 2,
             pointRadius: ptRadius, fill: false, tension: 0.3, hidden: true },
-          { label: 'Crypto ($)', data: valCrypto, borderColor: '#ffd600',
+          { label: 'Crypto ($)', data: toXY(timestamps, valCrypto), borderColor: '#ffd600',
             backgroundColor: 'rgba(255,214,0,0.05)', borderWidth: 2,
             pointRadius: ptRadius, fill: false, tension: 0.3, hidden: true },
-          { label: 'Cash ($)', data: valCash, borderColor: '#b0b8d8',
+          { label: 'Cash ($)', data: toXY(timestamps, valCash), borderColor: '#b0b8d8',
             backgroundColor: 'rgba(176,184,216,0.05)', borderWidth: 2,
             pointRadius: ptRadius, fill: false, tension: 0.3, hidden: true }
         ]
@@ -903,11 +921,12 @@ HTML = """
     const portfolioViews = {{ chart_views | safe }};
     function setPortfolioView(view) {
       const vd = portfolioViews[view];
-      chart.data.labels           = vd.labels;
-      chart.data.datasets[0].data = vd.values;
-      chart.data.datasets[1].data = vd.stock_values;
-      chart.data.datasets[2].data = vd.crypto_values;
-      chart.data.datasets[3].data = vd.cash_values;
+      chart.data.datasets[0].data = toXY(vd.timestamps, vd.values);
+      chart.data.datasets[1].data = toXY(vd.timestamps, vd.stock_values);
+      chart.data.datasets[2].data = toXY(vd.timestamps, vd.crypto_values);
+      chart.data.datasets[3].data = toXY(vd.timestamps, vd.cash_values);
+      chart.options.scales.x.min = vd.timestamps[0];
+      chart.options.scales.x.max = vd.timestamps[vd.timestamps.length - 1];
       chart.update('none');
       ['24h','7d'].forEach(v => {
         const btn = document.getElementById('pvbtn-' + v);
@@ -1099,7 +1118,7 @@ def dashboard():
                 signal = 'HOLD'
             sent_label = '🟢' if sent_score > 0.05 else '🔴' if sent_score < -0.05 else '⚪'
             p          = pos_dict.get(ticker)
-            shares     = int(float(p.qty)) if p else 0
+            shares     = fmt_qty(p.qty) if p else 0
             stocks.append({
                 'ticker':     ticker,
                 'name':       COMPANY_NAMES.get(ticker, ticker),
@@ -1172,7 +1191,7 @@ def dashboard():
                 signal = 'HOLD'
             alpaca_symbol = symbol.replace('/', '')
             p             = pos_dict.get(alpaca_symbol)
-            coins         = round(float(p.qty), 6) if p else 0
+            coins         = fmt_qty(p.qty) if p else 0
             crypto.append({
                 'ticker':     symbol,
                 'name':       COMPANY_NAMES.get(symbol, symbol),
@@ -1199,7 +1218,7 @@ def dashboard():
         'time':   o.submitted_at.strftime('%d/%m %H:%M') if o.submitted_at else '—',
         'symbol': o.symbol,
         'name':   COMPANY_NAMES.get(o.symbol, o.symbol),
-        'side':   o.side, 'qty': o.qty,
+        'side':   o.side, 'qty': fmt_qty(o.qty),
         'price':  o.filled_avg_price or '—',
         'is_crypto': o.symbol in crypto_syms,
     } for o in all_orders]
@@ -1209,6 +1228,7 @@ def dashboard():
     chart_views = build_chart_views()
     view_7d     = chart_views['7d']
     chart_labels        = view_7d['labels']
+    chart_timestamps    = view_7d['timestamps']
     chart_values        = view_7d['values']
     chart_stock_values  = view_7d['stock_values']
     chart_crypto_values = view_7d['crypto_values']
@@ -1231,7 +1251,7 @@ def dashboard():
         row = {
             'symbol':     p.symbol,
             'name':       'S&P 500 ETF (default)' if p.symbol == 'SPY' else COMPANY_NAMES.get(p.symbol, p.symbol),
-            'qty':        int(float(p.qty)) if is_stock else round(float(p.qty), 6),
+            'qty':        fmt_qty(p.qty),
             'avg_price':  f"{entry:,.4f}",
             'current':    f"{current:,.4f}",
             'value':      f"{float(p.market_value):,.2f}",
@@ -1267,6 +1287,7 @@ def dashboard():
         orders=orders, crypto_orders=crypto_orders,
         updated=datetime.now().strftime('%H:%M:%S'),
         chart_labels=json.dumps(chart_labels),
+        chart_timestamps=json.dumps(chart_timestamps),
         chart_values=json.dumps(chart_values),
         chart_stock_values=json.dumps(chart_stock_values),
         chart_crypto_values=json.dumps(chart_crypto_values),

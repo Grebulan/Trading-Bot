@@ -1,5 +1,6 @@
 import json
 import time
+import fcntl
 import yfinance as yf
 from transformers import pipeline
 
@@ -17,12 +18,15 @@ TICKERS = [
 ]
 
 _finbert = None
+FINBERT_LOCK_FILE = '/tmp/finbert_load.lock'
 
 def get_finbert():
     global _finbert
     if _finbert is None:
-        _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
-                            tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
+        with open(FINBERT_LOCK_FILE, 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
+                                tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
     return _finbert
 
 def get_sentiment(ticker):
