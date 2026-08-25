@@ -1,10 +1,10 @@
 import json
 import time
-import fcntl
+import requests
 import yfinance as yf
-from transformers import pipeline
 
 CACHE_FILE = '/home/jv/stock_sentiment_cache.json'
+FINBERT_SERVICE_URL = 'http://127.0.0.1:5051/score'
 
 TICKERS = [
     'AAPL','GOOGL','AMZN','PLTR','CRWD',
@@ -17,17 +17,15 @@ TICKERS = [
     'CAT','VRT',
 ]
 
-_finbert = None
-FINBERT_LOCK_FILE = '/tmp/finbert_load.lock'
-
-def get_finbert():
-    global _finbert
-    if _finbert is None:
-        with open(FINBERT_LOCK_FILE, 'w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
-                                tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
-    return _finbert
+def score_headlines(headlines):
+    """Score headlines via the local FinBERT service. Neutral on any failure."""
+    try:
+        resp = requests.post(FINBERT_SERVICE_URL, json={'headlines': headlines}, timeout=30)
+        resp.raise_for_status()
+        return resp.json()['scores']
+    except Exception as e:
+        print(f"  FinBERT service unavailable ({e}), using neutral sentiment")
+        return [{'label': 'neutral', 'score': 0.0} for _ in headlines]
 
 def get_sentiment(ticker):
     try:
@@ -51,7 +49,7 @@ def get_sentiment(ticker):
         if not headlines:
             return 0.0
 
-        results = get_finbert()(headlines, truncation=True, max_length=512, batch_size=8)
+        results = score_headlines(headlines)
         scores = []
         for r in results:
             if r['label'] == 'positive':

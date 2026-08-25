@@ -1,29 +1,23 @@
 import os
 import json
 import time
-import fcntl
 import requests
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from transformers import pipeline
 
-_finbert = None
-FINBERT_LOCK_FILE = '/tmp/finbert_load.lock'
-
-def get_finbert():
-    global _finbert
-    if _finbert is None:
-        with open(FINBERT_LOCK_FILE, 'w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            _finbert = pipeline('sentiment-analysis', model='ProsusAI/finbert',
-                                tokenizer='ProsusAI/finbert', truncation=True, max_length=512)
-    return _finbert
+FINBERT_SERVICE_URL = 'http://127.0.0.1:5051/score'
 
 def score_headlines(headlines):
-    """Run FinBERT on a list of headline strings, return compound score -1..+1."""
+    """Score headlines via the local FinBERT service, return compound score -1..+1."""
     if not headlines:
         return 0.0
-    results = get_finbert()(headlines, truncation=True, max_length=512, batch_size=8)
+    try:
+        resp = requests.post(FINBERT_SERVICE_URL, json={'headlines': headlines}, timeout=30)
+        resp.raise_for_status()
+        results = resp.json()['scores']
+    except Exception as e:
+        print(f"  FinBERT service unavailable ({e}), using neutral sentiment")
+        return 0.0
     scores = []
     for r in results:
         if r['label'] == 'positive':
