@@ -1,10 +1,24 @@
 import json
+import os
 import time
 import requests
-import yfinance as yf
 
 CACHE_FILE = '/home/jv/stock_sentiment_cache.json'
 FINBERT_SERVICE_URL = 'http://127.0.0.1:5051/score'
+# yfinance's .news started returning [] for every ticker (~2026-10-01), so
+# headlines now come from Alpaca's news API using the existing trading keys.
+ALPACA_NEWS_URL = 'https://data.alpaca.markets/v1beta1/news'
+
+def load_env():
+    env = {}
+    with open(os.path.expanduser('~/.env_trading')) as f:
+        for line in f:
+            if '=' in line:
+                k, v = line.strip().split('=', 1)
+                env[k] = v
+    return env
+
+ENV = load_env()
 
 TICKERS = [
     'AAPL','GOOGL','AMZN','PLTR','CRWD',
@@ -27,26 +41,23 @@ def score_headlines(headlines):
         print(f"  FinBERT service unavailable ({e}), using neutral sentiment")
         return [{'label': 'neutral', 'score': 0.0} for _ in headlines]
 
+def fetch_headlines(ticker, limit=10):
+    """Latest headlines tagged with this ticker from Alpaca news."""
+    resp = requests.get(
+        ALPACA_NEWS_URL,
+        params={'symbols': ticker, 'limit': limit, 'sort': 'desc'},
+        headers={'APCA-API-KEY-ID': ENV['ALPACA_KEY'],
+                 'APCA-API-SECRET-KEY': ENV['ALPACA_SECRET']},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return [a['headline'] for a in resp.json().get('news', []) if a.get('headline')]
+
 def get_sentiment(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        news  = stock.news
-        if not news:
-            return 0.0
-
-        headlines = []
-        for article in news[:10]:
-            title = ''
-            try:
-                title = article.get('title', '') or \
-                        article.get('content', {}).get('title', '') or \
-                        article.get('content', {}).get('summary', '')
-            except:
-                pass
-            if title:
-                headlines.append(title)
-
+        headlines = fetch_headlines(ticker)
         if not headlines:
+            print(f"  ⚠️  {ticker}: no headlines returned — news source may be broken, using 0.0")
             return 0.0
 
         results = score_headlines(headlines)
