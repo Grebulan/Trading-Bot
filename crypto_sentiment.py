@@ -76,6 +76,24 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w') as f:
         json.dump(cache, f, indent=2)
 
+def fetch_via_alpaca(symbol):
+    """Alpaca news (same source as stock sentiment). CryptoPanic's free developer API was
+    retired (404 as of 2026-10-04) and yfinance news returns nothing, so this is the main source."""
+    try:
+        env  = load_env()
+        resp = requests.get(
+            'https://data.alpaca.markets/v1beta1/news',
+            params={'symbols': symbol.replace('/', ''), 'limit': 10, 'sort': 'desc'},
+            headers={'APCA-API-KEY-ID': env['ALPACA_KEY'], 'APCA-API-SECRET-KEY': env['ALPACA_SECRET']},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        headlines = [a['headline'] for a in resp.json().get('news', []) if a.get('headline')]
+        return score_headlines(headlines) if headlines else None
+    except Exception as e:
+        print(f"  ⚠️  {symbol}: Alpaca news failed ({e})")
+        return None
+
 def fetch_via_cryptopanic(currency):
     """Try CryptoPanic first."""
     try:
@@ -117,18 +135,20 @@ def fetch_via_yahoo(symbol):
             return 0.0
 
 def refresh_all_sentiment():
-    """Fetch sentiment for all coins, CryptoPanic first, Yahoo fallback."""
+    """Fetch sentiment for all coins: Alpaca news first, then CryptoPanic, then Yahoo."""
     cache = load_cache()
     now   = time.time()
 
     for symbol, currency in SYMBOL_MAP.items():
-        score = fetch_via_cryptopanic(currency)
+        score, source = fetch_via_alpaca(symbol), 'Alpaca+FinBERT'
         if score is None:
-            score = fetch_via_yahoo(symbol)
-            source = 'Yahoo+FinBERT'
-        else:
-            source = 'CryptoPanic+FinBERT'
-            time.sleep(2)
+            score, source = fetch_via_cryptopanic(currency), 'CryptoPanic+FinBERT'
+            if score is not None:
+                time.sleep(2)
+        if score is None:
+            score, source = fetch_via_yahoo(symbol), 'Yahoo+FinBERT'
+            if not score:
+                print(f"  ⚠️  {symbol}: no headlines from any source — using 0.0")
 
         cache[symbol] = {'score': score, 'fetched': now}
         label = '🟢' if score > 0.05 else '🔴' if score < -0.05 else '⚪'

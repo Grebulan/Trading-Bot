@@ -4,6 +4,8 @@ Stock trader with performance logging.
 Runs hourly during market hours via crontab.
 """
 import os
+import math
+import time
 import json
 import joblib
 import pandas as pd
@@ -53,7 +55,9 @@ SECTORS = {
 TICKER_SECTOR = {t: s for s, tickers in SECTORS.items() for t in tickers}
 
 STOP_LOSS       = 0.12   # 12% trailing — moves up with price
-HARD_STOP       = 0.06   # 6% hard stop from entry — catches decliners that never set a higher peak for the trailing stop to work off
+# Hard stop disabled 2026-10-04: walk-forward sim over 5,142 out-of-sample picks (2019-2026) showed
+# the 6% hard stop lowered avg return per trade (+6.0% vs +6.9% without). Set to e.g. 0.06 to re-enable.
+HARD_STOP       = None
 TAKE_PROFIT     = 0.20   # 20% — let winners run for weeks
 MAX_POSITIONS   = 8      # max simultaneous stock positions (excludes SPY)
 VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
@@ -62,6 +66,7 @@ VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
 SPY_TRAIL_STOP  = 0.05   # 5% trailing stop — conservative given SPY is majority of portfolio
 SPY_VIX_CRASH   = 40     # hard sell if VIX spikes above this (sudden crash)
 SPY_MIN_RESERVE = 2000   # always keep this much cash free
+STOCK_POSITION_PCT = 0.08  # target size of each ML stock buy, as a share of equity
 
 HIGHWATER_FILE  = '/home/jv/stock_highwater.json'
 
@@ -211,6 +216,31 @@ def log_signal(symbol, signal, confidence, sentiment, price, acted, reason):
     with open(log_file, 'w') as f:
         json.dump(data, f, indent=2)
 
+def fund_from_spy(needed, spy_state):
+    """Sell just enough whole SPY shares to raise `needed` cash for an ML stock buy.
+    SPY is the parking spot for spare cash, so ML signals take priority over it. Leaves the
+    SPY high-water mark alone, so the remaining shares keep their trailing stop.
+    Returns cash raised (0 if nothing was sold)."""
+    if spy_state['qty'] < 1 or needed <= 0:
+        return 0.0
+    shares = min(math.ceil(needed / spy_state['price']), spy_state['qty'])
+    print(f"  💱 Selling {shares} SPY (~${shares * spy_state['price']:,.2f}) to fund ML buy")
+    order = api.submit_order(symbol='SPY', qty=shares, side='sell', type='market', time_in_force='day')
+    for _ in range(15):                       # market orders normally fill within seconds
+        time.sleep(2)
+        order = api.get_order(order.id)
+        if order.status == 'filled':
+            raised = float(order.filled_qty) * float(order.filled_avg_price)
+            spy_state['qty'] -= int(float(order.filled_qty))
+            print(f"  ✅ SPY sale filled: ${raised:,.2f}")
+            return raised
+    try:
+        api.cancel_order(order.id)
+    except Exception:
+        pass
+    print(f"  ⚠️  SPY sale not filled ({order.status}) — cancelled, skipping buy")
+    return 0.0
+
 def run():
     account = api.get_account()
     cash    = float(account.cash)
@@ -236,6 +266,9 @@ def run():
 
     positions = {p.symbol: p for p in api.list_positions()}
     stock_position_count = len([s for s in positions if s != 'SPY'])
+    spy_pos   = positions.get('SPY')
+    spy_state = {'qty': int(float(spy_pos.qty)) if spy_pos else 0,
+                 'price': float(spy_pos.current_price) if spy_pos else 0.0}
     signals_logged = 0
 
     hw = load_highwater()
@@ -294,7 +327,7 @@ def run():
                 locked_pct = (peak - entry_price) / entry_price
                 print(f"  Position: {float(pos.qty):.4f} shares, entry ${entry_price:,.2f}, P&L {pnl_pct:+.1%} | Peak ${peak:,.2f} (+{locked_pct:.1%}) | Trail stop ${trail_stop:,.2f}")
 
-                if pnl_pct <= -HARD_STOP:
+                if HARD_STOP and pnl_pct <= -HARD_STOP:
                     print(f"  🛑 Hard stop — {pnl_pct:.1%} from entry ${entry_price:,.2f}")
                     api.submit_order(symbol=ticker, qty=float(pos.qty),
                                      side='sell', type='market', time_in_force='day')
@@ -355,11 +388,15 @@ def run():
                     signals_logged += 1
                     continue
 
+                target_size = equity * STOCK_POSITION_PCT
+                if cash - 100 < target_size:
+                    cash += fund_from_spy(target_size - (cash - 100), spy_state)
+
                 if cash < 1000:
                     print(f"  ⏸️  Skipping BUY — insufficient cash (${cash:,.2f})")
                     continue
 
-                position_size = min(equity * 0.08, cash - 100)
+                position_size = min(target_size, cash - 100)
                 fractionable  = is_fractionable(ticker)
 
                 if fractionable:

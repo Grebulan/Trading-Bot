@@ -15,7 +15,7 @@ import yfinance as yf
 import xgboost as xgb
 from datetime import datetime
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score
 
 logging.basicConfig(
     filename='/home/jv/retrain.log',
@@ -249,30 +249,61 @@ def retrain_stocks():
         all_data[ticker]['Sector_Momentum_5d'] = sector_returns[sector].rolling(5).mean()
         all_data[ticker].dropna(inplace=True)
 
-    combined = pd.concat(all_data.values())
-    X = combined[STOCK_FEATURES]
-    y = combined['Target'].squeeze()
-    buy_rate = float(y.mean())
-    spw = (1 - buy_rate) / buy_rate
-    p(f"✅ Combined: {len(combined):,} rows, {X.shape[1]} features")
+    combined = pd.concat(all_data.values()).sort_index(kind='stable')
+    ts = combined.index
+
+    # Time-based evaluation (fixed 2026-10-04) — same reasoning as the crypto model: the old
+    # split tested on the last 5 tickers in the list (GOLD/UNH/ISRG/CAT/VRT), not on the future,
+    # and those tickers were never trained on. Gap = label lookahead (60 trading days ≈ 90 days).
+    LABEL_HORIZON = pd.Timedelta(days=90)
+    BUY_CONFIDENCE = 0.60                       # must match trader.py's BUY threshold
+    test_cut = ts[int(len(ts) * 0.8)]
+    val_cut  = ts[int(len(ts) * 0.7)]
+    fit_df   = combined[ts <  val_cut - LABEL_HORIZON]
+    val_df   = combined[(ts >= val_cut) & (ts < test_cut - LABEL_HORIZON)]
+    test_df  = combined[ts >= test_cut]
+
+    buy_rate = float(combined['Target'].mean())
+    fit_rate = float(fit_df['Target'].mean())
+    spw = (1 - fit_rate) / fit_rate
+    p(f"✅ Combined: {len(combined):,} rows, {len(STOCK_FEATURES)} features")
     p(f"   TP-first rate: {buy_rate:.1%}  →  scale_pos_weight: {spw:.2f}")
+    p(f"   Fit: {len(fit_df):,} rows to {val_cut - LABEL_HORIZON:%Y-%m-%d}  |  "
+      f"Val: {len(val_df):,}  |  Test: {len(test_df):,} rows from {test_cut:%Y-%m-%d}")
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False)
+    def make_model(n_estimators, early_stop):
+        return xgb.XGBClassifier(
+            n_estimators=n_estimators, max_depth=6, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            scale_pos_weight=spw,
+            random_state=42, n_jobs=-1,
+            eval_metric='logloss', verbosity=0,
+            early_stopping_rounds=50 if early_stop else None,
+        )
 
-    p("⚡ Training XGBoost...")
-    model = xgb.XGBClassifier(
-        n_estimators=500, max_depth=6, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        scale_pos_weight=spw,
-        random_state=42, n_jobs=-1,
-        eval_metric='logloss', verbosity=0,
-        early_stopping_rounds=50,
-    )
-    model.fit(X_train, y_train,
-              eval_set=[(X_test, y_test)], verbose=False)
-    acc = accuracy_score(y_test, model.predict(X_test))
-    p(f"✅ Stock accuracy: {acc:.1%} (best iteration: {model.best_iteration})")
+    p("⚡ Training XGBoost (evaluation model)...")
+    model = make_model(500, early_stop=True)
+    model.fit(fit_df[STOCK_FEATURES], fit_df['Target'],
+              eval_set=[(val_df[STOCK_FEATURES], val_df['Target'])], verbose=False)
+
+    y_test    = test_df['Target']
+    proba     = model.predict_proba(test_df[STOCK_FEATURES])[:, 1]
+    acc       = accuracy_score(y_test, proba >= 0.5)
+    baseline  = 1 - y_test.mean()
+    base_rate = y_test.mean()                   # hit rate of buying on a random day
+    picks     = y_test[proba >= BUY_CONFIDENCE] # what trader.py would actually buy
+    n_picks   = int(len(picks))
+    pick_rate = float(picks.mean()) if n_picks else 0.0
+    edge      = pick_rate - base_rate
+    has_edge  = bool(edge >= 0.05 and n_picks >= 100)
+    p(f"✅ Stock accuracy: {acc:.1%}  (always-no baseline: {baseline:.1%}, best iteration: {model.best_iteration})")
+    p(f"   Picks at ≥{BUY_CONFIDENCE:.0%} confidence: {n_picks:,} — hit TP {pick_rate:.1%} vs random {base_rate:.1%}"
+      f"  →  edge {edge:+.1%}  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
+
+    # Deploy a model refit on all labelled data (all tickers, incl. the recent test period)
+    p("⚡ Refitting on all data for deployment...")
+    model = make_model(model.best_iteration + 1, early_stop=False)
+    model.fit(combined[STOCK_FEATURES], combined['Target'], verbose=False)
 
     joblib.dump(model, '/home/jv/trading_model.joblib')
     with open('/home/jv/features.json', 'w') as f:
@@ -282,10 +313,18 @@ def retrain_stocks():
             'trained_at':    datetime.now().strftime('%Y-%m-%d %H:%M'),
             'model_type':    'XGBoost',
             'accuracy':      f"{acc:.1%}",
+            'baseline_accuracy': f"{baseline:.1%}",
+            'pick_hit_rate': f"{pick_rate:.1%}",
+            'random_buy_hit_rate': f"{base_rate:.1%}",
+            'edge':          f"{edge:+.1%}",
+            'has_edge':      has_edge,
+            'test_picks':    n_picks,
+            'buy_confidence': BUY_CONFIDENCE,
+            'evaluation':    f"time split, test from {test_cut:%Y-%m-%d}, 90-day purge gap",
             'features':      len(STOCK_FEATURES),
-            'training_rows': len(X_train),
+            'training_rows': len(combined),
             'tickers':       STOCK_TICKERS,
-            'target':        'exit-simulation: TP +8% before SL -5% within 20 days',
+            'target':        'exit-simulation: TP +20% before SL -12% within 60 trading days',
         }, f)
 
     elapsed = time.time() - start
@@ -397,38 +436,63 @@ def retrain_crypto():
         crypto_data[symbol]['Crypto_Momentum_24h'] = crypto_mom_24h
         crypto_data[symbol].dropna(inplace=True)
 
-    combined = pd.concat(crypto_data.values())
-    X = combined[CRYPTO_FEATURES]
-    y = combined['Target'].squeeze()
+    combined = pd.concat(crypto_data.values()).sort_index(kind='stable')
+    ts = combined.index
 
-    buy_rate = y.mean()
-    # scale_pos_weight balances the class imbalance explicitly
-    # e.g. if 35% BUY and 65% SELL, weight = 65/35 ≈ 1.86
-    spw = (1 - buy_rate) / buy_rate
-    p(f"✅ Combined: {len(combined):,} rows, {X.shape[1]} features")
+    # Time-based evaluation (fixed 2026-10-04). The old 80/20 split on the coin-by-coin
+    # concat tested on DOT+ADA over the whole 2 years, so "accuracy" never measured
+    # predicting the future. Now: test on the most recent 20% of time across all coins,
+    # with a gap of LABEL_HORIZON hours so no training label peeks into the test period.
+    LABEL_HORIZON = pd.Timedelta(hours=720)
+    test_cut = ts[int(len(ts) * 0.8)]
+    val_cut  = ts[int(len(ts) * 0.6)]
+    fit_df   = combined[ts <  val_cut - LABEL_HORIZON]                         # trees learn here
+    val_df   = combined[(ts >= val_cut) & (ts < test_cut - LABEL_HORIZON)]     # early stopping
+    test_df  = combined[ts >= test_cut]                                        # never seen in training
+
+    buy_rate = combined['Target'].mean()
+    fit_rate = fit_df['Target'].mean()
+    spw = (1 - fit_rate) / fit_rate
+    p(f"✅ Combined: {len(combined):,} rows, {len(CRYPTO_FEATURES)} features")
     p(f"   BUY rate: {buy_rate:.1%}  →  scale_pos_weight: {spw:.2f}")
+    p(f"   Fit: {len(fit_df):,} rows to {val_cut - LABEL_HORIZON:%Y-%m-%d}  |  "
+      f"Val: {len(val_df):,}  |  Test: {len(test_df):,} rows from {test_cut:%Y-%m-%d}")
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False)
+    def make_model(n_estimators, early_stop):
+        return xgb.XGBClassifier(
+            n_estimators=n_estimators, max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            scale_pos_weight=spw,                # class balance fix
+            random_state=42, n_jobs=-1,
+            eval_metric='logloss', verbosity=0,
+            early_stopping_rounds=50 if early_stop else None,
+        )
 
-    p("⚡ Training XGBoost...")
-    model = xgb.XGBClassifier(
-        n_estimators=500, max_depth=5,       # reduced from 6 — less overfitting
-        learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        scale_pos_weight=spw,                # class balance fix
-        random_state=42, n_jobs=-1,
-        eval_metric='logloss', verbosity=0,
-        early_stopping_rounds=50,
-    )
-    model.fit(X_train, y_train,
-              eval_set=[(X_test, y_test)], verbose=False)
+    p("⚡ Training XGBoost (evaluation model)...")
+    model = make_model(500, early_stop=True)
+    model.fit(fit_df[CRYPTO_FEATURES], fit_df['Target'],
+              eval_set=[(val_df[CRYPTO_FEATURES], val_df['Target'])], verbose=False)
 
-    acc = accuracy_score(y_test, model.predict(X_test))
-    preds_test = model.predict(X_test)
-    buy_preds  = preds_test.mean()
-    p(f"✅ Crypto accuracy: {acc:.1%} (best iteration: {model.best_iteration})")
-    p(f"   BUY predictions on test set: {buy_preds:.1%}  (was ~2% before fix)")
+    y_test     = test_df['Target']
+    preds_test = model.predict(test_df[CRYPTO_FEATURES])
+    acc        = accuracy_score(y_test, preds_test)
+    baseline   = 1 - y_test.mean()                  # accuracy of always saying "don't buy"
+    base_rate  = y_test.mean()                      # hit rate of buying at random
+    n_buys     = int(preds_test.sum())
+    buy_prec   = precision_score(y_test, preds_test, zero_division=0)
+    edge       = buy_prec - base_rate
+    # Edge = model's BUY calls hit TP more often than random entries, on enough calls to mean something
+    has_edge   = bool(edge >= 0.03 and n_buys >= 200)
+    p(f"✅ Crypto accuracy: {acc:.1%}  (always-no baseline: {baseline:.1%}, best iteration: {model.best_iteration})")
+    p(f"   BUY precision: {buy_prec:.1%} vs random {base_rate:.1%}  →  edge {edge:+.1%} "
+      f"on {n_buys:,} BUY calls  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
+
+    # Deploy a model refit on all labelled data (incl. the recent test period) with the
+    # tree count found above, so live predictions reflect the latest regime.
+    p("⚡ Refitting on all data for deployment...")
+    model = make_model(model.best_iteration + 1, early_stop=False)
+    model.fit(combined[CRYPTO_FEATURES], combined['Target'], verbose=False)
 
     joblib.dump(model, '/home/jv/crypto_model.joblib')
     with open('/home/jv/crypto_features.json', 'w') as f:
@@ -438,11 +502,18 @@ def retrain_crypto():
             'trained_at':    datetime.now().strftime('%Y-%m-%d %H:%M'),
             'model_type':    'XGBoost hourly',
             'accuracy':      f"{acc:.1%}",
+            'baseline_accuracy': f"{baseline:.1%}",
+            'buy_precision': f"{buy_prec:.1%}",
+            'random_buy_hit_rate': f"{base_rate:.1%}",
+            'edge':          f"{edge:+.1%}",
+            'has_edge':      has_edge,
+            'test_buy_calls': n_buys,
+            'evaluation':    f"time split, test from {test_cut:%Y-%m-%d}, 720h purge gap",
             'features':      len(CRYPTO_FEATURES),
-            'training_rows': len(X_train),
+            'training_rows': len(combined),
             'coins':         list(CRYPTOS.keys()),
             'interval':      '1h',
-            'target':        'exit-simulation: TP +10% before SL -8% within 120h',
+            'target':        'exit-simulation: TP +25% before SL -15% within 720h',
             'buy_rate':      f"{buy_rate:.1%}",
         }, f)
 

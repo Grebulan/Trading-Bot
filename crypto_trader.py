@@ -55,6 +55,10 @@ MIN_CASH         = 500.0
 MAX_POSITION     = 0.10
 MAX_POSITIONS    = 5      # max simultaneous crypto positions
 VIX_BUY_THRESHOLD = 30   # skip buys in high-volatility regimes
+# Paused 2026-10-04: time-split test showed BUY picks worse than random (23% vs 31% base rate).
+# Existing positions still managed by trailing stop / take-profit. Re-enable once retrain.py
+# reports the model beating its baseline on recent data.
+BUYS_PAUSED      = True
 
 HIGHWATER_FILE   = '/home/jv/crypto_highwater.json'
 
@@ -341,6 +345,9 @@ def main():
                 continue
 
             if signal == 'BUY' and alpaca_symbol not in positions:
+                if BUYS_PAUSED:
+                    print(f"  ⏸️  Skipping BUY — crypto buys paused (model has no proven edge)")
+                    continue
                 if mkt and not mkt.get('BTC_Regime'):
                     print(f"  ⏸️  Skipping BUY — BTC below 200-day MA (bear regime)")
                     continue

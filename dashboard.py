@@ -604,6 +604,7 @@ HTML = """
       <span class="topnav h1">🤖 Trading Bot</span>
       <span class="subtitle">Updated: {{ updated }} &bull; auto-refresh 5min</span>
       <a href="/milestones" style="padding:4px 12px;border-radius:6px;background:#1a1d2e;border:1px solid #2a2d4a;color:#9aa3b5;font-size:0.78em;font-weight:bold;text-decoration:none" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#9aa3b5'">📍 Milestones</a>
+      <a href="/review" style="padding:4px 12px;border-radius:6px;background:#1a1d2e;border:1px solid #2a2d4a;color:#9aa3b5;font-size:0.78em;font-weight:bold;text-decoration:none" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#9aa3b5'">🧐 Weekly Review</a>
     </div>
     <div class="nav-header-right" style="display:flex;align-items:center;gap:20px">
       <span class="nav-countdown" style="font-size:0.78em;color:#9aa3b5">
@@ -1593,6 +1594,161 @@ def milestones_page():
         chart_labels=_json.dumps(chart_labels),
         chart_values=_json.dumps(chart_values),
     )
+
+
+REVIEW_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trading Bot — Weekly Review</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0c14; color: #e0e6ff; font-family: -apple-system, 'Segoe UI', sans-serif;
+           padding: 24px 20px; min-height: 100vh; max-width: 960px; margin: 0 auto; line-height: 1.5; }
+    a { color: #448aff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .page-header { display: flex; align-items: center; justify-content: space-between;
+                   margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+    .page-title { font-size: 1.4em; font-weight: 700; }
+    .page-title span { color: #448aff; }
+    .back-btn { padding: 7px 16px; border-radius: 7px; background: #1a1d2e; border: 1px solid #2a2d4a;
+                color: #aaa; font-size: 0.85em; font-weight: 600; }
+    .back-btn:hover { color: #fff; border-color: #448aff; text-decoration: none; }
+    select { background: #1a1d2e; color: #e0e6ff; border: 1px solid #2a2d4a; border-radius: 7px;
+             padding: 6px 10px; font-size: 0.85em; }
+    .card { background: #111420; border: 1px solid #1e2540; border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
+    .card h2 { font-size: 0.78em; color: #666; font-weight: 700; text-transform: uppercase;
+               letter-spacing: 0.1em; margin-bottom: 12px; }
+    .status { display: inline-block; padding: 3px 12px; border-radius: 20px; font-weight: 700;
+              font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+    .s-green { background: #00c85322; color: #00c853; } .s-amber { background: #ffab0022; color: #ffab00; }
+    .s-red { background: #ff4d6a22; color: #ff4d6a; }
+    .headline { font-size: 1.15em; font-weight: 600; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stat { background: #111420; border: 1px solid #1e2540; border-radius: 10px; padding: 14px 16px; }
+    .stat .label { font-size: 0.7em; color: #666; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
+    .stat .value { font-size: 1.25em; font-weight: 700; margin-top: 4px; }
+    .stat .sub { font-size: 0.78em; color: #9aa3b5; }
+    .green { color: #00c853; } .red { color: #ff4d6a; }
+    .finding { border-left: 3px solid #2a2d4a; padding: 8px 0 8px 14px; margin-bottom: 12px; }
+    .finding .title { font-weight: 600; }
+    .finding .meta { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.08em; color: #666; }
+    .finding .detail { color: #c0c8e0; font-size: 0.92em; margin-top: 2px; }
+    .f-critical { border-color: #ff4d6a; } .f-warning { border-color: #ffab00; }
+    .f-info { border-color: #448aff; } .f-good { border-color: #00c853; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+    td, th { text-align: left; padding: 7px 8px; border-bottom: 1px solid #1e2540; vertical-align: top; }
+    th { color: #666; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.08em; }
+    .pri { white-space: nowrap; font-weight: 700; font-size: 0.8em; }
+    .error { background: #ff4d6a18; border: 1px solid #ff4d6a55; color: #ffb3c0; }
+    .muted { color: #666; font-size: 0.8em; }
+    @media (max-width: 600px) { body { padding: 16px; } }
+  </style>
+</head>
+<body>
+  <div class="page-header">
+    <div class="page-title">🧐 Weekly <span>Review</span></div>
+    <div style="display:flex;gap:10px;align-items:center">
+      {% if dates %}
+      <select onchange="location='/review?date='+this.value">
+        {% for d in dates %}<option value="{{ d }}" {% if entry and d == entry.date %}selected{% endif %}>{{ d }}</option>{% endfor %}
+      </select>
+      {% endif %}
+      <a class="back-btn" href="/">← Dashboard</a>
+    </div>
+  </div>
+
+  {% if not entry %}
+    <div class="card">No reviews yet. The review agent runs every Sunday at 04:30.</div>
+  {% else %}
+    {% set r = entry.review %}
+    {% set perf = entry.facts.performance %}
+
+    {% if entry.error %}
+      <div class="card error"><b>Review could not be generated:</b> {{ entry.error }}<br>
+      <span class="muted">The facts below were still collected.</span></div>
+    {% endif %}
+
+    {% if r %}
+    <div class="card">
+      <div class="status s-{{ r.status }}">{{ r.status }}</div>
+      <div class="headline">{{ r.headline }}</div>
+    </div>
+    {% endif %}
+
+    {% if perf and not perf.error %}
+    <div class="grid">
+      {% for label, key in [('Since start', 'since_start'), ('Since SPY strategy', 'since_spy_strategy'), ('Last 4 weeks', 'last_4_weeks'), ('Last week', 'last_week')] %}
+        {% set p = perf[key] %}{% if p %}
+        <div class="stat">
+          <div class="label">{{ label }}</div>
+          <div class="value {{ 'green' if p.bot_pct >= p.spy_pct else 'red' }}">{{ '%+.2f' % p.bot_pct }}%</div>
+          <div class="sub">SPY {{ '%+.2f' % p.spy_pct }}% · from {{ p['from'] }}</div>
+        </div>{% endif %}
+      {% endfor %}
+      <div class="stat">
+        <div class="label">Portfolio</div>
+        <div class="value">${{ '{:,.0f}'.format(perf.equity) }}</div>
+        <div class="sub">{{ perf.positions|length }} positions</div>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if r %}
+    <div class="card">
+      <h2>Bot vs just holding SPY</h2>
+      <div>{{ r.benchmark_summary }}</div>
+    </div>
+
+    <div class="card">
+      <h2>Recommended actions</h2>
+      {% if r.recommended_actions %}
+      <table>
+        <tr><th>When</th><th>Action</th><th>Why</th></tr>
+        {% for a in r.recommended_actions %}
+        <tr><td class="pri">{{ a.priority }}</td><td>{{ a.action }}</td><td style="color:#c0c8e0">{{ a.why }}</td></tr>
+        {% endfor %}
+      </table>
+      <div class="muted" style="margin-top:10px">Advisory only — the agent never changes the bot itself.</div>
+      {% else %}<div>Nothing to do this week.</div>{% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Findings</h2>
+      {% for f in r.findings %}
+      <div class="finding f-{{ f.severity }}">
+        <div class="meta">{{ f.severity }} · {{ f.area }}</div>
+        <div class="title">{{ f.title }}</div>
+        <div class="detail">{{ f.detail }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="muted">
+      Facts gathered {{ entry.facts.generated_at }}
+      {% if entry.usage %} · reviewed by {{ entry.usage.model }} · ~${{ entry.usage.approx_cost_usd }}{% endif %}
+    </div>
+  {% endif %}
+</body>
+</html>
+"""
+
+
+@app.route('/review')
+@requires_auth
+def review_page():
+    import json as _json
+    reviews = []
+    if os.path.exists('/home/jv/weekly_reviews.json'):
+        with open('/home/jv/weekly_reviews.json') as f:
+            reviews = _json.load(f)
+    dates = [r['date'] for r in reversed(reviews)]
+    wanted = request.args.get('date')
+    entry = next((r for r in reviews if r['date'] == wanted), reviews[-1] if reviews else None)
+    return render_template_string(REVIEW_HTML, entry=entry, dates=dates)
 
 
 if __name__ == '__main__':
