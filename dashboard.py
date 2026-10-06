@@ -12,19 +12,20 @@ import secrets
 
 
 app = Flask(__name__)
-def _load_secret_key():
+def _load_env_value(name):
     try:
         with open(os.path.expanduser('~/.env_trading')) as f:
             for line in f:
-                if line.startswith('DASHBOARD_SECRET_KEY='):
+                if line.startswith(name + '='):
                     return line.strip().split('=', 1)[1]
     except Exception:
         pass
-    return secrets.token_hex(32)
+    return None
 
-app.secret_key = _load_secret_key()
+app.secret_key = _load_env_value('DASHBOARD_SECRET_KEY') or secrets.token_hex(32)
 
-DASHBOARD_PASSWORD = 'negril'
+# No fallback: if it's missing from ~/.env_trading, nobody can log in
+DASHBOARD_PASSWORD = _load_env_value('DASHBOARD_PASSWORD')
 SESSION_DAYS = 30
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -122,13 +123,20 @@ def _parse_history_time(t):
 
 def build_chart_views(history_file='/home/jv/portfolio_history.json'):
     """
-    Return three resampled views of portfolio_history.json suitable for
+    Return resampled views of portfolio_history.json suitable for
     chart rendering.  Each view is a dict with parallel lists:
       labels, values, stock_values, crypto_values
 
     24h  — raw 30-min data for the last 24 real hours
-    7d   — 1 point per 4 hours for the last 7 days
-    all  — 1 point per 4 hours for all available data
+    7d   — 1 point per 30 min for the last 7 days
+    30d  — 1 point per 2 hours for the last 30 days
+    3m   — 1 point per 6 hours for the last 90 days
+    6m   — 1 point per 12 hours for the last 182 days
+    all  — 1 point per hour for all available data
+
+    Entries marked 'backfilled' were filled in from Alpaca's account history
+    and only have a total value — their stock/crypto/cash are None, which
+    Chart.js draws as a gap rather than a misleading zero.
 
     Resampling to equal density stops old sparse data and new dense data
     from producing wildly different visual weights on a category-scale chart.
@@ -137,22 +145,22 @@ def build_chart_views(history_file='/home/jv/portfolio_history.json'):
 
     if not os.path.exists(history_file):
         empty = dict(labels=[], values=[], stock_values=[], crypto_values=[], cash_values=[])
-        return {'24h': empty, '7d': empty, 'all': empty}
+        return {'24h': empty, '7d': empty, '30d': empty, '3m': empty, '6m': empty, 'all': empty}
 
     with open(history_file) as f:
         history = json.load(f)
 
     if not history:
         empty = dict(labels=[], values=[], stock_values=[], crypto_values=[], cash_values=[])
-        return {'24h': empty, '7d': empty, 'all': empty}
+        return {'24h': empty, '7d': empty, '30d': empty, '3m': empty, '6m': empty, 'all': empty}
 
     def to_row(h):
         return {
             'time':   h['time'],
             'value':  h['value'],
-            'stock':  h.get('stock_value', 0),
-            'crypto': h.get('crypto_value', 0),
-            'cash':   h.get('cash', 0),
+            'stock':  None if h.get('backfilled') else h.get('stock_value', 0),
+            'crypto': None if h.get('backfilled') else h.get('crypto_value', 0),
+            'cash':   None if h.get('backfilled') else h.get('cash', 0),
             'dt':     _parse_history_time(h['time']),
         }
 
@@ -184,7 +192,8 @@ def build_chart_views(history_file='/home/jv/portfolio_history.json'):
             'values':       [r['value']  for r in data],
             'stock_values': [r['stock']  for r in data],
             'crypto_values':[r['crypto'] for r in data],
-            'cash_values':  [max(0, round(r['value'] - r['stock'] - r['crypto'], 2)) for r in data],
+            'cash_values':  [None if r['stock'] is None
+                             else max(0, round(r['value'] - r['stock'] - r['crypto'], 2)) for r in data],
         }
 
     earliest   = rows[0]['dt']
@@ -200,6 +209,17 @@ def build_chart_views(history_file='/home/jv/portfolio_history.json'):
     raw_7d     = [r for r in rows if r['dt'] >= cutoff_7d]
     view_7d    = make_view(resample(raw_7d, 0.5) if span_hours > 24 else raw_7d)
 
+    # 30D: resample to 2h buckets to keep the point count manageable (~360)
+    cutoff_30d = latest - timedelta(days=30)
+    raw_30d    = [r for r in rows if r['dt'] >= cutoff_30d]
+    view_30d   = make_view(resample(raw_30d, 2) if span_hours > 48 else raw_30d)
+
+    # 3M / 6M: coarser buckets keep both views at roughly 360 points
+    cutoff_3m = latest - timedelta(days=90)
+    view_3m   = make_view(resample([r for r in rows if r['dt'] >= cutoff_3m], 6))
+    cutoff_6m = latest - timedelta(days=182)
+    view_6m   = make_view(resample([r for r in rows if r['dt'] >= cutoff_6m], 12))
+
     # ALL: resample to 1h buckets if >48h of data, 30-min if >24h, else raw
     if span_hours > 48:
         view_all = make_view(resample(rows, 1))
@@ -208,7 +228,7 @@ def build_chart_views(history_file='/home/jv/portfolio_history.json'):
     else:
         view_all = make_view(rows)
 
-    return {'24h': view_24h, '7d': view_7d, 'all': view_all}
+    return {'24h': view_24h, '7d': view_7d, '30d': view_30d, '3m': view_3m, '6m': view_6m, 'all': view_all}
 
 def get_stock_sentiment_cached(ticker):
     """Return cached sentiment score, or 0.0 if cache missing/stale."""
@@ -710,6 +730,9 @@ HTML = """
           <div style="display:flex;background:#252840;border-radius:20px;padding:2px">
             <div id="pvbtn-24h" style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#9aa3b5;transition:all 0.2s" onclick="setPortfolioView('24h')">24H</div>
             <div id="pvbtn-7d"  style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;background:#2e3250;color:#fff;transition:all 0.2s" onclick="setPortfolioView('7d')">7D</div>
+            <div id="pvbtn-30d" style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#9aa3b5;transition:all 0.2s" onclick="setPortfolioView('30d')">30D</div>
+            <div id="pvbtn-3m"  style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#9aa3b5;transition:all 0.2s" onclick="setPortfolioView('3m')">3M</div>
+            <div id="pvbtn-6m"  style="padding:3px 12px;border-radius:18px;font-size:0.72em;font-weight:bold;cursor:pointer;color:#9aa3b5;transition:all 0.2s" onclick="setPortfolioView('6m')">6M</div>
           </div>
           <div class="chart-toggles">
             <div class="chart-toggle total active"  onclick="toggleLine(chart, 0, this)">Total</div>
@@ -840,9 +863,12 @@ HTML = """
     }
 
     // Shade non-trading periods (outside Mon-Fri 14:30-21:00 UK time)
+    // Trading-hours shading is meaningless at 6h/12h resolution, so 3M/6M switch it off
+    let shadeTradingHours = true;
     const tradingHoursPlugin = {
       id: 'tradingHoursShading',
       beforeDraw(chart) {
+        if (!shadeTradingHours) return;
         const { ctx, chartArea, scales } = chart;
         const xScale = scales.x;
         const pts = chart.data.datasets[0].data;
@@ -922,6 +948,7 @@ HTML = """
     const portfolioViews = {{ chart_views | safe }};
     function setPortfolioView(view) {
       const vd = portfolioViews[view];
+      shadeTradingHours = !['3m', '6m'].includes(view);
       chart.data.datasets[0].data = toXY(vd.timestamps, vd.values);
       chart.data.datasets[1].data = toXY(vd.timestamps, vd.stock_values);
       chart.data.datasets[2].data = toXY(vd.timestamps, vd.crypto_values);
@@ -929,7 +956,7 @@ HTML = """
       chart.options.scales.x.min = vd.timestamps[0];
       chart.options.scales.x.max = vd.timestamps[vd.timestamps.length - 1];
       chart.update('none');
-      ['24h','7d'].forEach(v => {
+      ['24h','7d','30d','3m','6m'].forEach(v => {
         const btn = document.getElementById('pvbtn-' + v);
         btn.style.background = v === view ? '#2e3250' : 'transparent';
         btn.style.color      = v === view ? '#fff' : '#9aa3b5';
@@ -1016,7 +1043,7 @@ def login():
     from datetime import timedelta
     next_url = request.args.get('next', '/')
     if request.method == 'POST':
-        if request.form.get('password') == DASHBOARD_PASSWORD:
+        if DASHBOARD_PASSWORD and request.form.get('password') == DASHBOARD_PASSWORD:
             session.permanent = True
             app.permanent_session_lifetime = timedelta(days=SESSION_DAYS)
             session['authed'] = True
