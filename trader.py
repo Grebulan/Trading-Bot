@@ -59,7 +59,13 @@ STOP_LOSS       = 0.12   # 12% trailing — moves up with price
 # the 6% hard stop lowered avg return per trade (+6.0% vs +6.9% without). Set to e.g. 0.06 to re-enable.
 HARD_STOP       = None
 TAKE_PROFIT     = 0.20   # 20% — let winners run for weeks
-MAX_POSITIONS   = 8      # max simultaneous stock positions (excludes SPY)
+# Stop override (2026-10-20): if the model still says BUY (>=60%) when the trailing stop is hit,
+# keep holding, unless the position is down STOP_OVERRIDE_BACKSTOP from entry, which always sells.
+# Walk-forward sim 2019-2026: +$99k vs SPY against +$88k with the stop always selling (better in
+# 94% of resamples), mostly by avoiding stop-out-then-rebuy cycles. Set to None to disable.
+STOP_OVERRIDE_CONF     = 0.60
+STOP_OVERRIDE_BACKSTOP = 0.30
+MAX_POSITIONS   = 6      # max simultaneous stock positions (excludes SPY); was 8 until 2026-10-20 (6 x 8% caps stocks at ~48%)
 VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
 
 # SPY default position — holds spare cash when no stock signals are firing
@@ -265,7 +271,8 @@ def run():
             all_returns[ticker] = {'latest': 0.0, '5d': 0.0}
 
     positions = {p.symbol: p for p in api.list_positions()}
-    stock_position_count = len([s for s in positions if s != 'SPY'])
+    stock_position_count = len([s for s, p in positions.items()   # ML stocks only, not SPY or crypto
+                                if s != 'SPY' and p.asset_class == 'us_equity'])
     spy_pos   = positions.get('SPY')
     spy_state = {'qty': int(float(spy_pos.qty)) if spy_pos else 0,
                  'price': float(spy_pos.current_price) if spy_pos else 0.0}
@@ -340,6 +347,13 @@ def run():
                     continue
 
                 if trail_pct <= -STOP_LOSS:
+                    if (STOP_OVERRIDE_CONF and pred == 1 and conf >= STOP_OVERRIDE_CONF
+                            and -STOP_OVERRIDE_BACKSTOP < pnl_pct < TAKE_PROFIT):
+                        print(f"  ✋ Trailing stop hit ({trail_pct:.1%} from peak) but model still says BUY "
+                              f"({conf:.1%}) — holding (sells regardless at {-STOP_OVERRIDE_BACKSTOP:.0%} from entry)")
+                        log_signal(ticker, 'SELL', conf, sent_score, current_price, False, 'stop_override')
+                        signals_logged += 1
+                        continue
                     print(f"  🛑 Trailing stop — {trail_pct:.1%} from peak ${peak:,.2f} (locked {locked_pct:+.1%})")
                     api.submit_order(symbol=ticker, qty=float(pos.qty),
                                      side='sell', type='market', time_in_force='day')
