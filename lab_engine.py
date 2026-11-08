@@ -19,7 +19,7 @@ MENU = {
     # legacy24 (the old hand-picked list) is hindsight-biased: kept in lab_data for reference, not searched
     'universe':       ['sp500', 'sp500_tech', 'sp400', 'etf_rotation', 'leveraged_etfs'],
     'signal':         ['mom_12_1', 'mom_6m', 'mom_3m', 'mom_1m', 'reversal_1w', 'rsi_oversold',
-                       'near_52w_high', 'low_vol', 'risk_adj_mom'],
+                       'near_52w_high', 'low_vol', 'risk_adj_mom', 'mom_blend', 'trend_mom'],
     'top_k':          [3, 5, 10, 15, 20],
     'rebalance_days': [5, 10, 21],
     'weighting':      ['equal', 'inv_vol'],
@@ -76,6 +76,16 @@ def compute_signal(name, close):
         s = -ret.rolling(60).std()
     elif name == 'risk_adj_mom':
         s = (close / close.shift(126) - 1) / ret.rolling(126).std()
+    elif name == 'mom_blend':
+        # (2026-11-08) average cross-sectional rank of 3m, 6m and 12-1 momentum: less dependent
+        # on any one lookback window than a single momentum signal
+        parts = [close / close.shift(63) - 1, close / close.shift(126) - 1,
+                 close.shift(21) / close.shift(252) - 1]
+        s = sum(p.rank(axis=1, pct=True) for p in parts) / len(parts)
+    elif name == 'trend_mom':
+        # (2026-11-08) 6-month momentum, but only for stocks above their own 200-day average;
+        # the rest are left out (NaN), so the book can hold fewer names or go to cash in a selloff
+        s = (close / close.shift(126) - 1).where(close > close.rolling(200, min_periods=180).mean())
     else:
         raise ValueError(name)
     return s.astype('float32')
