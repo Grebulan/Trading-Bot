@@ -63,8 +63,14 @@ TAKE_PROFIT     = 0.20   # 20% — let winners run for weeks
 # keep holding, unless the position is down STOP_OVERRIDE_BACKSTOP from entry, which always sells.
 # Walk-forward sim 2019-2026: +$99k vs SPY against +$88k with the stop always selling (better in
 # 94% of resamples), mostly by avoiding stop-out-then-rebuy cycles. Set to None to disable.
-STOP_OVERRIDE_CONF     = 0.60
+# Disabled 2026-11-08 (weekly review): live losses ran to -15..-25% (VRT, ARM, CAT) and CAT was
+# stopped out then rebought within the hour. Set back to 0.60 to re-enable.
+STOP_OVERRIDE_CONF     = None
 STOP_OVERRIDE_BACKSTOP = 0.30
+# Stock buys paused 2026-11-08 (weekly review): ML picks were $8,900 behind holding SPY, 1 of 12
+# closed trades beat it. Signals are still logged (reason 'buys_paused') so the model can be judged
+# without risking money. Existing positions still exit via trailing stop / take-profit.
+BUYS_PAUSED     = True
 MAX_POSITIONS   = 6      # max simultaneous stock positions (excludes SPY); was 8 until 2026-10-20 (6 x 8% caps stocks at ~48%)
 VIX_BUY_THRESHOLD = 28  # skip buys when volatility is elevated
 
@@ -384,6 +390,12 @@ def run():
 
             # --- BUY logic ---
             if pred == 1 and conf >= 0.60:
+                if BUYS_PAUSED:
+                    print(f"  ⏸️  Skipping BUY — stock buys paused (live picks trailing SPY)")
+                    log_signal(ticker, 'BUY', conf, sent_score, current_price, False, 'buys_paused')
+                    signals_logged += 1
+                    continue
+
                 if not mkt['SPY_Regime']:
                     print(f"  ⏸️  Skipping BUY — SPY below 200-day MA (bear regime)")
                     continue

@@ -9,6 +9,7 @@ import json
 import time
 import joblib
 import logging
+import sys
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -25,7 +26,9 @@ logging.basicConfig(
 log = logging.getLogger()
 
 def p(msg):
-    print(msg)
+    # Under cron, stdout is also redirected into retrain.log — printing there too duplicated every line
+    if sys.stdout.isatty():
+        print(msg)
     log.info(msg)
 
 def make_exit_label(df, take_profit, stop_loss, max_bars):
@@ -202,6 +205,77 @@ def get_market_indicators_crypto():
 # ============================================================
 # STOCK MODEL — unchanged
 # ============================================================
+# Live-rule evaluation (2026-11-08). The label-based test above counts every day a stock is flagged
+# as a separate pick (~1,000 "picks" are ~130 real trades) and uses a fixed stop from entry, which
+# flattered the model: it claimed 55.8% TP vs 35.2% random, while live trades went 1 for 12.
+# This replays the test period the way trader.py actually trades and judges the model on money vs SPY,
+# against random buys of the same tickers (which also beat SPY, because the ticker list was picked
+# with hindsight). Constants must match trader.py.
+LIVE_TRAIL_STOP  = 0.12   # trader.py STOP_LOSS (trailing from the highest close)
+LIVE_TAKE_PROFIT = 0.20   # trader.py TAKE_PROFIT
+LIVE_MAX_HOLD    = 60     # trading days; trader.py has no time exit, this matches the label horizon
+LIVE_VIX_MAX     = 28     # trader.py VIX_BUY_THRESHOLD (buys also need SPY above its 200-day MA)
+
+def simulate_live_exit(o, h, l, c, i):
+    """Buy at close of bar i, exit with trader.py's rules. Returns (exit_bar, return, hit_tp).
+    Gaps through a stop or target fill at the open; checked once a day, so it misses the
+    small extra slippage of hourly checks."""
+    entry = peak = c[i]
+    end   = min(i + LIVE_MAX_HOLD, len(c) - 1)
+    tp    = entry * (1 + LIVE_TAKE_PROFIT)
+    for j in range(i + 1, end + 1):
+        stop = peak * (1 - LIVE_TRAIL_STOP)
+        if o[j] <= stop: return j, o[j] / entry - 1, False
+        if o[j] >= tp:   return j, o[j] / entry - 1, True
+        if l[j] <= stop: return j, stop / entry - 1, False   # assume the stop came first on a wide day
+        if h[j] >= tp:   return j, LIVE_TAKE_PROFIT, True
+        peak = max(peak, c[j])
+    return end, c[end] / entry - 1, False
+
+def live_rule_eval(test_df, proba, prices, buy_confidence):
+    """Model trades (one open position per ticker, like trader.py) vs random buys on any eligible
+    day, both measured against holding SPY over the same days."""
+    spy = yf.download('SPY', period="15y", interval="1d", progress=False)
+    spy.columns = [col[0] if isinstance(col, tuple) else col for col in spy.columns]
+    spy_c   = spy['Close']
+    regime  = (spy_c > spy_c.rolling(200).mean())
+    df = test_df[['Ticker', 'VIX']].copy()
+    df['proba'] = proba
+    df = df[(df['VIX'] <= LIVE_VIX_MAX) & regime.reindex(df.index).fillna(False).values]
+
+    model_out, random_out = [], []
+    for ticker, rows in df.groupby('Ticker'):
+        px = prices[ticker]
+        o, h, l, c = (px[k].values for k in ('Open', 'High', 'Low', 'Close'))
+        busy_until = -1
+        for d, prob in zip(rows.index, rows['proba']):
+            i = px.index.get_loc(d)
+            j, ret, hit = simulate_live_exit(o, h, l, c, i)
+            spy_ret = float(spy_c.asof(px.index[j]) / spy_c.asof(d) - 1)
+            rec = (ret, hit, ret - spy_ret)
+            random_out.append(rec)
+            if prob >= buy_confidence and i > busy_until:
+                model_out.append(rec)
+                busy_until = j
+    m, r = np.array(model_out, dtype=float), np.array(random_out, dtype=float)
+    if len(m) == 0:
+        return {'trades': 0, 'has_edge': False}
+    se    = float(m[:, 2].std(ddof=1) / np.sqrt(len(m))) if len(m) > 1 else float('nan')
+    extra = float(m[:, 2].mean() - r[:, 2].mean())
+    return {
+        'trades':              len(m),
+        'tp_rate':             float(m[:, 1].mean()),
+        'avg_return':          float(m[:, 0].mean()),
+        'avg_vs_spy':          float(m[:, 2].mean()),
+        'beat_spy':            float((m[:, 2] > 0).mean()),
+        'random_tp_rate':      float(r[:, 1].mean()),
+        'random_avg_vs_spy':   float(r[:, 2].mean()),
+        'extra_vs_random':     extra,
+        'standard_error':      se,
+        # Needs enough trades, and the model's gain over random buys must be clear of noise
+        'has_edge':            bool(len(m) >= 50 and extra >= 2 * se),
+    }
+
 def retrain_stocks():
     p("\n" + "="*50)
     p("📈 RETRAINING STOCK MODEL")
@@ -210,12 +284,15 @@ def retrain_stocks():
 
     p("📥 Downloading stock data...")
     all_data = {}
+    prices   = {}
     for ticker in STOCK_TICKERS:
         try:
             df = yf.download(ticker, period="15y", interval="1d", progress=False)
             df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
             df = build_base_features(df)
             df['Target'] = make_exit_label(df, take_profit=0.20, stop_loss=0.12, max_bars=60)
+            prices[ticker] = df[['Open', 'High', 'Low', 'Close']].copy()   # before dropna, for live_rule_eval
+            df['Ticker'] = ticker
             df.dropna(inplace=True)
             df['Target'] = df['Target'].astype(int)
             buy_rate = df['Target'].mean()
@@ -295,10 +372,18 @@ def retrain_stocks():
     n_picks   = int(len(picks))
     pick_rate = float(picks.mean()) if n_picks else 0.0
     edge      = pick_rate - base_rate
-    has_edge  = bool(edge >= 0.05 and n_picks >= 100)
     p(f"✅ Stock accuracy: {acc:.1%}  (always-no baseline: {baseline:.1%}, best iteration: {model.best_iteration})")
-    p(f"   Picks at ≥{BUY_CONFIDENCE:.0%} confidence: {n_picks:,} — hit TP {pick_rate:.1%} vs random {base_rate:.1%}"
-      f"  →  edge {edge:+.1%}  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
+    p(f"   Label test (counts every flagged day, fixed stop): {n_picks:,} picks — hit TP {pick_rate:.1%} "
+      f"vs random {base_rate:.1%}  →  {edge:+.1%}")
+
+    lr = live_rule_eval(test_df, proba, prices, BUY_CONFIDENCE)
+    has_edge = lr['has_edge']
+    if lr['trades']:
+        p(f"   Live-rule test: {lr['trades']} trades — hit TP {lr['tp_rate']:.1%} (random {lr['random_tp_rate']:.1%}), "
+          f"avg {lr['avg_return']:+.1%}/trade, vs SPY {lr['avg_vs_spy']:+.1%} (random buys {lr['random_avg_vs_spy']:+.1%}), "
+          f"beat SPY {lr['beat_spy']:.0%}")
+    p(f"   Model's gain over random buys: {lr.get('extra_vs_random', 0):+.1%}/trade "
+      f"(±{lr.get('standard_error', 0):.1%})  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
 
     # Deploy a model refit on all labelled data (all tickers, incl. the recent test period)
     p("⚡ Refitting on all data for deployment...")
@@ -317,8 +402,23 @@ def retrain_stocks():
             'pick_hit_rate': f"{pick_rate:.1%}",
             'random_buy_hit_rate': f"{base_rate:.1%}",
             'edge':          f"{edge:+.1%}",
-            'has_edge':      has_edge,
+            'has_edge':      has_edge,   # from live_rule_test since 2026-11-08
             'test_picks':    n_picks,
+            'label_test_note': 'pick_hit_rate/random_buy_hit_rate/edge/test_picks count every flagged day '
+                               'with a fixed stop; they overstate the edge. Use live_rule_test.',
+            'live_rule_test': {
+                'trades':            lr['trades'],
+                'tp_rate':           f"{lr.get('tp_rate', 0):.1%}",
+                'random_tp_rate':    f"{lr.get('random_tp_rate', 0):.1%}",
+                'avg_return':        f"{lr.get('avg_return', 0):+.1%}",
+                'avg_vs_spy':        f"{lr.get('avg_vs_spy', 0):+.1%}",
+                'random_avg_vs_spy': f"{lr.get('random_avg_vs_spy', 0):+.1%}",
+                'extra_vs_random':   f"{lr.get('extra_vs_random', 0):+.1%}",
+                'standard_error':    f"{lr.get('standard_error', 0):.1%}",
+                'beat_spy':          f"{lr.get('beat_spy', 0):.0%}",
+                'rule': 'one position per ticker, 12% trailing stop, +20% TP, 60-day max, SPY>200MA, VIX<=28; '
+                        'has_edge needs >=50 trades and extra_vs_random >= 2 standard errors',
+            },
             'buy_confidence': BUY_CONFIDENCE,
             'evaluation':    f"time split, test from {test_cut:%Y-%m-%d}, 90-day purge gap",
             'features':      len(STOCK_FEATURES),
