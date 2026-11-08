@@ -82,7 +82,8 @@ real results, not from luck or hindsight:
 | `trade_tally.py` | Every ML stock trade vs leaving the money in SPY, with exit reasons |
 | `weekly_review.py` | Sunday review: gathers facts and asks Claude for a plain-English assessment |
 | `record_milestone.py` | Weekly portfolio snapshot (used for the Sharpe ratio) |
-| `record_portfolio.py`, `performance_log.py`, `email_summary.py` | Portfolio history, signal outcomes, daily email |
+| `weekly_email.py` | Sunday summary email: performance, review verdict, champion and challengers |
+| `record_portfolio.py`, `performance_log.py` | Portfolio history, signal outcomes |
 | `run_trader_et.sh` | Runs `trader.py` at fixed US Eastern times, despite UK/US clock changes |
 | `logts.sh` | Adds timestamps to cron log output |
 | `auto_commit.sh` | Nightly commit and push of the source files to this repo |
@@ -100,13 +101,13 @@ real results, not from luck or hindsight:
 | Every 2 hours at :07 | `crypto_trader.py` |
 | Hourly | News sentiment refresh |
 | Every 30 min | `record_portfolio.py` |
-| Daily 22:10 | `email_summary.py` |
 | Daily 23:00 | `auto_commit.sh` |
 | Sunday 02:15 | `retrain.py` |
 | Sunday 04:00 | `record_milestone.py` |
 | Sunday 03:00 | `lab.py` (strategy lab) |
 | Sunday 04:30 | `weekly_review.py` |
 | Sunday 05:00 | `auto_adjust.py` |
+| Sunday 05:15 | `weekly_email.py` |
 | Weekdays 15:30 ET | `champion_trader.py` |
 
 ## Setup

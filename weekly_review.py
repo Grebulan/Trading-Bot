@@ -29,7 +29,7 @@ LOGS = {   # log file -> how often cron should write to it (hours), for stalenes
     'trader.log':          24 * 3,   # weekdays only, so allow a weekend gap
     'crypto.log':          2,
     'portfolio.log':       1,
-    'email.log':           24,
+    'email.log':           24 * 7,  # weekly_email.py, Sunday 05:15 (daily email retired 2026-11-08)
     'retrain.log':         24 * 7,
     'milestone.log':       24 * 7,
     'sentiment.log':       1,

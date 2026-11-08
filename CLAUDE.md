@@ -8,7 +8,8 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 |---|---|
 | `trader.py` | Main trading logic — runs on cron |
 | `dashboard.py` | Flask web dashboard on port 5000 |
-| `email_summary.py` | Portfolio email summary |
+| `weekly_email.py` | Sunday 05:15 email: performance vs SPY, review verdict, champion, challengers' shadow records, lab activity, positions. `--preview` writes HTML instead of sending |
+| `email_summary.py` | Old daily email, retired 2026-11-08 (cron line commented out) |
 | `record_milestone.py` | Weekly Sunday portfolio snapshot |
 | `weekly_review.py` | Sunday review agent — gathers facts, asks Claude (needs `ANTHROPIC_API_KEY`), writes `weekly_reviews.json` for `/review`. Advisory only |
 | `auto_adjust.py` | Sunday 5am, after the review: applies the review's risk-reducing `setting_changes` to `trader.py`, and restarts stock buys only when fixed evidence rules pass. Commits, pushes and emails every change. State in `auto_adjust_state.json`. `--dry-run` to preview |
@@ -28,6 +29,7 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 - **Weekly milestone:** Sunday 4am (`record_milestone.py`)
 - **Weekly review agent:** Sunday 4:30am (`weekly_review.py`)
 - **Auto-adjust:** Sunday 5:00am (`auto_adjust.py`, logs to `auto_adjust.log`)
+- **Weekly email:** Sunday 5:15am (`weekly_email.py`, `email.log`). The daily 10pm email was retired 2026-11-08
 - **Strategy lab:** Sunday 3:00am (`lab.py`, `lab.log`)
 - **Champion trader:** weekdays 15:30 ET via `run_trader_et.sh` (`champion_trader.py`, `champion.log`). Does nothing while `legacy_ml` is champion
 - **Weekly retrain:** Sunday (runs before milestone)
