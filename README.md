@@ -30,6 +30,9 @@ So far the bot has not beaten simply holding SPY:
   different stocks and ETFs, signals, leverage and short-selling. Promising ones are "shadow-traded"
   (tracked without risking the account), and one that beats both SPY and the live bot over 8+ weeks
   takes over the account. See [Strategy lab](#strategy-lab).
+- **It changes its own code.** Every Sunday a self-improvement agent (Claude, via the API) carries out
+  the weekly review's recommendations by editing the bot, tests its changes, and keeps them only if
+  every safety check passes. It can't touch the code that measures the bot's performance.
 - **Real money:** 2027 at the earliest. To get there, the bot must beat SPY over the period, show a
   positive trade tally and reach a Sharpe ratio above 1.0.
 
@@ -82,6 +85,7 @@ real results, not from luck or hindsight:
 | `trade_tally.py` | Every ML stock trade vs leaving the money in SPY, with exit reasons |
 | `weekly_review.py` | Sunday review: gathers facts and asks Claude for a plain-English assessment |
 | `record_milestone.py` | Weekly portfolio snapshot (used for the Sharpe ratio) |
+| `bot_agent.py` | Sunday self-improvement agent: implements the review's recommendations, with safety checks and automatic revert |
 | `weekly_email.py` | Sunday summary email: performance, review verdict, champion and challengers |
 | `record_portfolio.py`, `performance_log.py` | Portfolio history, signal outcomes |
 | `run_trader_et.sh` | Runs `trader.py` at fixed US Eastern times, despite UK/US clock changes |
@@ -107,7 +111,8 @@ real results, not from luck or hindsight:
 | Sunday 03:00 | `lab.py` (strategy lab) |
 | Sunday 04:30 | `weekly_review.py` |
 | Sunday 05:00 | `auto_adjust.py` |
-| Sunday 05:15 | `weekly_email.py` |
+| Sunday 05:20 | `bot_agent.py` (self-improvement) |
+| Sunday 06:30 | `weekly_email.py` |
 | Weekdays 15:30 ET | `champion_trader.py` |
 
 ## Setup

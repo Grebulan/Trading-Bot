@@ -4,8 +4,8 @@ Weekly review agent — runs Sunday after record_milestone.py.
 
 Gathers facts about the bot (performance vs SPY, model health, log errors, Pi health),
 asks Claude to review them, and saves the report to weekly_reviews.json for the
-dashboard's /review page. Read-only: it never places trades or changes settings itself. Its
-setting_changes (risk-reducing only) are applied by auto_adjust.py, which runs after it.
+dashboard's /review page. It never places trades or changes code itself: its setting_changes are
+applied by auto_adjust.py and its recommended_actions are implemented by bot_agent.py, both after it.
 """
 import os
 import re
@@ -38,6 +38,7 @@ LOGS = {   # log file -> how often cron should write to it (hours), for stalenes
     'auto_commit.log':     24,      # nightly commit + push to GitHub
     'auto_adjust.log':     24 * 7,  # Sunday automatic setting changes
     'lab.log':             24 * 7,  # Sunday strategy lab
+    'agent.log':           24 * 7,  # Sunday self-improvement agent
     'champion.log':        24 * 3,  # weekdays 15:30 ET (idle while legacy_ml is champion)
 }
 
@@ -246,6 +247,17 @@ def gather_lab():
     }
 
 
+def gather_agent():
+    """What the self-improvement agent did in its last runs."""
+    out = []
+    for r in read_json(f'{HOME}/agent_history.json', [])[-3:]:
+        rep = r.get('report') or {}
+        out.append({'date': r['date'], 'outcome': r.get('outcome'), 'summary': rep.get('summary'),
+                    'changes': [c['title'] for c in rep.get('changes', [])], 'not_done': rep.get('not_done'),
+                    'error': r.get('error'), 'cost_usd': r.get('cost_usd')})
+    return out
+
+
 def gather_facts(env, log_start, log_end):
     api = tradeapi.REST(env['ALPACA_KEY'], env['ALPACA_SECRET'],
                         'https://paper-api.alpaca.markets', api_version='v2')
@@ -253,7 +265,7 @@ def gather_facts(env, log_start, log_end):
     for key, fn in [('performance', lambda: gather_performance(api)), ('models', gather_models),
                     ('ml_trades_vs_spy', lambda: tally(api)),
                     ('logs', lambda: gather_logs(log_start, log_end)), ('system', gather_system), ('settings', gather_settings),
-                    ('auto_adjust', gather_auto_adjust), ('lab', gather_lab)]:
+                    ('auto_adjust', gather_auto_adjust), ('lab', gather_lab), ('agent', gather_agent)]:
         try:
             facts[key] = fn()
         except Exception as e:
@@ -298,12 +310,19 @@ Your job:
 - settings shows whether stock buys are paused and whether the stop override is on. While stock buys
   are paused, the tally only changes through the remaining open positions.
 
-Recommend actions. You are advisory, with one exception: setting_changes. auto_adjust.py applies these
-automatically, without the owner, so request one only for a critical risk finding. Only risk-reducing
-changes exist (pause stock buys, switch off the stop override, cut max positions by one). Each must
-not already be in place: see settings. Loosening (e.g. restarting stock buys) is never yours to request; fixed evidence rules in
-auto_adjust.py decide that, and facts.auto_adjust shows their current state and recent changes.
-Leave setting_changes empty in most weeks. Everything else remains the owner's decision. Prefer the smallest,
+Your recommended_actions are carried out automatically. The owner is not a trader and has delegated
+decisions to the bot: each Sunday after you, bot_agent.py (Claude with tools to read the code, edit it,
+backtest and run safety checks) implements them, and the owner is told afterwards. So write each action
+as a concrete instruction it can carry out or investigate, ranked by priority, and keep them to what
+genuinely matters. It cannot change the scorekeeping (this review, the trade tally, the lab's promotion
+rules, auto-adjust, the weekly email), the paper-trading setting, backtest costs or the has_edge bar;
+anything needing those, address to the owner explicitly. facts.agent shows what it did last time and
+whether its changes passed the checks: judge whether they helped.
+setting_changes are separate and immediate: auto_adjust.py applies them before the agent runs.
+Request one only for a critical risk finding. Only risk-reducing changes exist (pause stock buys,
+switch off the stop override, cut max positions by one), and each must not already be in place: see
+settings. Restarting stock buys is never yours to request; fixed evidence rules in auto_adjust.py
+decide that, and facts.auto_adjust shows their state. Leave setting_changes empty in most weeks. Prefer the smallest,
 safest action. Keep each finding to a few sentences, avoid jargon, and explain any number you cite.
 The project guide below may contain outdated figures; trust the live facts over it."""
 

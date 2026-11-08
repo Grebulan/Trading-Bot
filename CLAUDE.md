@@ -8,7 +8,8 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 |---|---|
 | `trader.py` | Main trading logic — runs on cron |
 | `dashboard.py` | Flask web dashboard on port 5000 |
-| `weekly_email.py` | Sunday 05:15 email: performance vs SPY, review verdict, champion, challengers' shadow records, lab activity, positions. `--preview` writes HTML instead of sending |
+| `bot_agent.py` | Sunday 05:20: implements the weekly review's recommendations by editing the bot's code (see Self-improvement agent). History in `agent_history.json` |
+| `weekly_email.py` | Sunday 06:30 email: performance vs SPY, review verdict, champion, challengers' shadow records, lab activity, positions. `--preview` writes HTML instead of sending |
 | `email_summary.py` | Old daily email, retired 2026-11-08 (cron line commented out) |
 | `record_milestone.py` | Weekly Sunday portfolio snapshot |
 | `weekly_review.py` | Sunday review agent — gathers facts, asks Claude (needs `ANTHROPIC_API_KEY`), writes `weekly_reviews.json` for `/review`. Advisory only |
@@ -29,7 +30,8 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 - **Weekly milestone:** Sunday 4am (`record_milestone.py`)
 - **Weekly review agent:** Sunday 4:30am (`weekly_review.py`)
 - **Auto-adjust:** Sunday 5:00am (`auto_adjust.py`, logs to `auto_adjust.log`)
-- **Weekly email:** Sunday 5:15am (`weekly_email.py`, `email.log`). The daily 10pm email was retired 2026-11-08
+- **Self-improvement agent:** Sunday 5:20am (`bot_agent.py`, `agent.log`)
+- **Weekly email:** Sunday 6:30am (`weekly_email.py`, `email.log`). The daily 10pm email was retired 2026-11-08
 - **Strategy lab:** Sunday 3:00am (`lab.py`, `lab.log`)
 - **Champion trader:** weekdays 15:30 ET via `run_trader_et.sh` (`champion_trader.py`, `champion.log`). Does nothing while `legacy_ml` is champion
 - **Weekly retrain:** Sunday (runs before milestone)
@@ -47,6 +49,16 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 - **Model evaluation:** `retrain.py` scores both models on a time split and logs HAS EDGE/NO EDGE (`has_edge` in `model_info.json` / `crypto_model_info.json`). Ignore raw accuracy, which sits at or below the always-no baseline. Stocks (2026-11-08): `has_edge` comes from `live_rule_test`, which replays the test period as real trades (one position per ticker, 12% trailing stop, +20% TP, SPY/VIX filters) and compares them with SPY and with random buys of the same tickers. It needs ≥50 trades and a gain over random buys of at least 2 standard errors. First result: 154 trades, +3.6% vs SPY per trade, but random buys of the same stocks also make +1.8%, so the model adds +1.9% ±1.0%, giving NO EDGE (just short of the bar). The old label test (`pick_hit_rate` ~55% vs ~35%) counts every flagged day and overstates the edge.
 - **Crypto buys paused (2026-10-04):** `BUYS_PAUSED = True` in `crypto_trader.py`. Time-split test showed no edge. Existing positions still exit via stops. `retrain.py` now evaluates crypto on recent data and logs `HAS EDGE`/`NO EDGE` (also `has_edge` in `crypto_model_info.json`); re-enable only on evidence.
 - **SPY crash exits:** 5% trailing stop OR VIX > 40 OR SPY below 200-day MA (bear regime)
+
+## Self-improvement agent (2026-11-08)
+The owner delegated decisions to the bot: they are not a trader and want it to act on its own recommendations. `bot_agent.py` runs Claude (Opus 5.5) through the API with its own narrow tools: read code, data and logs; edit `EDITABLE` files; create new `.py` files; `run_backtest`; `run_checks`; `finish`.
+- **Protected, the scorekeeping:** `weekly_review.py`, `trade_tally.py`, `lab.py` (promotion rules), `auto_adjust.py`, `weekly_email.py`, `bot_agent.py`, the shell scripts and `champion.json`. These stop the bot grading its own homework.
+- **Protected lines:** the paper-trading URLs, backtest costs, the 1.95× leverage cap and the `has_edge` bar.
+- **Off limits:** it can never read `~/.env_trading`.
+- **Before anything is kept,** compile, new pylint errors, imports of `trader`/`crypto_trader`, and dry runs of lab, champion (current champion and a leveraged long/short test strategy) and auto-adjust must all pass. Otherwise every change is reverted from `.agent_backup/`.
+- **Passing changes** are committed and pushed with the agent's message and reported in the weekly email. Anything it thinks needs a protected change goes in its `not_done` list for the owner.
+- **Budget:** 60 turns and $10 per run. The first dry run cost $0.49.
+- `python3 bot_agent.py --dry-run` does the work, runs the checks, then reverts everything.
 
 ## Strategy lab: champion vs challengers (2026-11-08)
 The owner wants the bot to evolve by itself on paper, taking as much risk as it likes, including leverage and shorts. Before any real money, the best version found is frozen for ~3 months as a final untouched test.

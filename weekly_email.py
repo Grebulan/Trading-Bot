@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Weekly summary email, Sunday 05:15, after the lab, the review and auto-adjust (2026-11-08).
+Weekly summary email, Sunday 06:30, after the lab, the review, auto-adjust and bot_agent (2026-11-08).
 Replaces the daily email_summary.py.
 
-Covers: performance vs SPY, the weekly review's verdict and urgent actions, which strategy is
+Covers: performance vs SPY, the weekly review's verdict and urgent actions, the changes the
+self-improvement agent (bot_agent.py) made, which strategy is
 trading the account, any automatic setting changes, the strategy lab's challengers and their
 shadow-trading records, this week's lab activity, and current positions.
 
@@ -124,12 +125,42 @@ def build(env):
         inner = (f'<p><span style="background:{colour};color:#fff;padding:2px 8px;border-radius:4px;'
                  f'font-size:12px;font-weight:600">{review["status"].upper()}</span> {escape(review["headline"])}</p>')
         if now:
-            inner += '<p style="margin:8px 0 2px"><b>Urgent recommendations</b></p><ul style="margin:0;padding-left:20px">' + \
-                     ''.join(f'<li style="margin:3px 0">{escape(a["action"])}</li>' for a in now) + '</ul>'
+            inner += ('<p style="margin:8px 0 2px"><b>Its most urgent recommendations</b> '
+                      '<span style="color:#666;font-size:13px">(the bot carries these out itself — see below)</span></p>'
+                      '<ul style="margin:0;padding-left:20px">' +
+                      ''.join(f'<li style="margin:3px 0">{escape(a["action"])}</li>' for a in now) + '</ul>')
         inner += '<p style="font-size:13px;color:#666">Full review on the dashboard\'s /review page.</p>'
         html.append(section('Weekly review', inner))
     elif entry.get('error'):
         html.append(section('Weekly review', f'<p style="color:#c53030">The review failed: {escape(entry["error"])}</p>'))
+
+    # What the bot changed in itself
+    runs = [r for r in read_json(f'{HOME}/agent_history.json', []) if r['date'] >= week_ago]
+    if runs:
+        r = runs[-1]
+        rep = r.get('report') or {}
+        outcome = r.get('outcome')
+        if outcome == 'applied':
+            inner = f'<p style="margin:4px 0">{escape(rep.get("summary", ""))}</p>'
+            inner += '<ul style="margin:4px 0;padding-left:20px">' + ''.join(
+                f'<li style="margin:6px 0"><b>{escape(c["title"])}</b><br>{escape(c["plain_english"])}'
+                f'<br><span style="color:#666;font-size:13px">Why: {escape(c["why"])}</span></li>'
+                for c in rep.get('changes', [])) + '</ul>'
+            inner += f'<p style="font-size:13px;color:#666">Saved to GitHub as {r.get("commit", "—")}. All safety checks passed.</p>'
+        elif outcome == 'no_changes':
+            inner = f'<p style="margin:4px 0">No changes this week. {escape(rep.get("summary", ""))}</p>'
+        elif outcome == 'reverted_checks_failed':
+            inner = ('<p style="margin:4px 0;color:#b7791f">The bot tried to change itself, but its changes failed the '
+                     'safety checks, so they were all undone. It will see this next week and try again.</p>'
+                     f'<p style="font-size:13px;color:#666">What it attempted: {escape(rep.get("summary", ""))}</p>')
+        else:
+            inner = (f'<p style="color:#c53030">The self-improvement run failed: {escape(r.get("error") or outcome or "unknown")}. '
+                     'Nothing was changed.</p>')
+        if rep.get('not_done'):
+            inner += ('<p style="margin:8px 0 2px"><b>Not done</b></p><ul style="margin:0;padding-left:20px">' + ''.join(
+                f'<li style="margin:3px 0">{escape(n["recommendation"])} — <span style="color:#666">{escape(n["reason"])}</span></li>'
+                for n in rep['not_done']) + '</ul>')
+        html.append(section('Changes the bot made to itself', inner))
 
     # Who is trading
     inner = f'<p style="margin:4px 0"><b>Champion:</b> {escape(champion_name(champ))} <span style="color:#666">(since {champ.get("since", "—")})</span></p>'

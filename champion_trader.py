@@ -16,6 +16,8 @@ overnight limit is 2x). Longs use fractional notional orders; shorts must be who
 that flips between long and short is closed first and reopened on the next run.
 
   python3 champion_trader.py --dry-run   # show the orders without placing them
+  python3 champion_trader.py --dry-run --test-champion   # dry run with a leveraged long/short test strategy
+                                                         # (bot_agent.py's check, whoever is champion)
 """
 import json
 import sys
@@ -51,6 +53,11 @@ def main():
     dry_run = '--dry-run' in sys.argv
     print(f"👑 Champion trader — {datetime.now():%Y-%m-%d %H:%M}{'  (DRY RUN)' if dry_run else ''}")
     champ = read_json(CHAMPION_FILE, {'id': 'legacy_ml'})
+    if '--test-champion' in sys.argv:
+        dry_run = True
+        champ = {'id': 'test', 'cfg': {'universe': 'sp500', 'signal': 'mom_6m', 'top_k': 10, 'rebalance_days': 5,
+                                       'weighting': 'inv_vol', 'leverage': 2.0, 'shorts': 0.25,
+                                       'regime': 'none', 'trail_stop': 0.15}}
     if champ['id'] == 'legacy_ml':
         print('  Champion is the original ML bot — trader.py trades, nothing to do')
         return
@@ -63,7 +70,7 @@ def main():
         return
     acct = api.get_account()
     equity = float(acct.equity)
-    state = read_json(STATE_FILE, {})
+    state = read_json(STATE_FILE, {}) if champ['id'] != 'test' else {}
     if state.get('champion') != champ['id']:          # new champion: rebalance now, fresh stop marks
         state = {'champion': champ['id'], 'last_rebalance': None, 'marks': {}}
     today = datetime.now().strftime('%Y-%m-%d')
