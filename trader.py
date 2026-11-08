@@ -390,12 +390,6 @@ def run():
 
             # --- BUY logic ---
             if pred == 1 and conf >= 0.60:
-                if BUYS_PAUSED:
-                    print(f"  ⏸️  Skipping BUY — stock buys paused (live picks trailing SPY)")
-                    log_signal(ticker, 'BUY', conf, sent_score, current_price, False, 'buys_paused')
-                    signals_logged += 1
-                    continue
-
                 if not mkt['SPY_Regime']:
                     print(f"  ⏸️  Skipping BUY — SPY below 200-day MA (bear regime)")
                     continue
@@ -404,14 +398,23 @@ def run():
                     print(f"  ⏸️  Skipping BUY — high VIX ({float(mkt['VIX']):.1f})")
                     continue
 
-                if stock_position_count >= MAX_POSITIONS:
-                    print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
-                    continue
-
                 if sent_score < -0.05:
                     print(f"  ⏸️  Skipping BUY — negative news ({sent_score:.2f})")
                     log_signal(ticker, 'BUY', conf, sent_score, current_price, False, 'sentiment_override')
                     signals_logged += 1
+                    continue
+
+                # After the market and news filters, so 'buys_paused' signals are exactly the buys the
+                # bot would have made (auto_adjust.py forward-tests them). The position cap is skipped
+                # while paused: open positions drain away, so it would hide signals.
+                if BUYS_PAUSED:
+                    print(f"  ⏸️  Skipping BUY — stock buys paused (live picks trailing SPY)")
+                    log_signal(ticker, 'BUY', conf, sent_score, current_price, False, 'buys_paused')
+                    signals_logged += 1
+                    continue
+
+                if stock_position_count >= MAX_POSITIONS:
+                    print(f"  ⏸️  Skipping BUY — max positions reached ({MAX_POSITIONS})")
                     continue
 
                 target_size = equity * STOCK_POSITION_PCT

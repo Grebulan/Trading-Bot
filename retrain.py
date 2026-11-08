@@ -216,11 +216,12 @@ LIVE_TAKE_PROFIT = 0.20   # trader.py TAKE_PROFIT
 LIVE_MAX_HOLD    = 60     # trading days; trader.py has no time exit, this matches the label horizon
 LIVE_VIX_MAX     = 28     # trader.py VIX_BUY_THRESHOLD (buys also need SPY above its 200-day MA)
 
-def simulate_live_exit(o, h, l, c, i):
-    """Buy at close of bar i, exit with trader.py's rules. Returns (exit_bar, return, hit_tp).
-    Gaps through a stop or target fill at the open; checked once a day, so it misses the
-    small extra slippage of hourly checks."""
-    entry = peak = c[i]
+def simulate_live_exit(o, h, l, c, i, entry=None):
+    """Buy at close of bar i (or at `entry`, e.g. an intraday price on that day), exit with
+    trader.py's rules. Returns (exit_bar, return, hit_tp). Gaps through a stop or target fill at
+    the open; checked once a day, so it misses the small extra slippage of hourly checks.
+    auto_adjust.py uses this too."""
+    entry = peak = c[i] if entry is None else entry
     end   = min(i + LIVE_MAX_HOLD, len(c) - 1)
     tp    = entry * (1 + LIVE_TAKE_PROFIT)
     for j in range(i + 1, end + 1):

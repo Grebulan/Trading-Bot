@@ -4,7 +4,8 @@ Weekly review agent — runs Sunday after record_milestone.py.
 
 Gathers facts about the bot (performance vs SPY, model health, log errors, Pi health),
 asks Claude to review them, and saves the report to weekly_reviews.json for the
-dashboard's /review page. Read-only: it never places trades or changes settings.
+dashboard's /review page. Read-only: it never places trades or changes settings itself. Its
+setting_changes (risk-reducing only) are applied by auto_adjust.py, which runs after it.
 """
 import os
 import re
@@ -35,6 +36,7 @@ LOGS = {   # log file -> how often cron should write to it (hours), for stalenes
     'stock_sentiment.log': 1,
     'performance.log':     24,
     'auto_commit.log':     24,      # nightly commit + push to GitHub
+    'auto_adjust.log':     24 * 7,  # Sunday automatic setting changes
 }
 
 
@@ -221,13 +223,20 @@ def gather_settings():
             'news_sentiment_caches': sent}
 
 
+def gather_auto_adjust():
+    """Recent automatic setting changes and where the restart-buys evidence stands."""
+    state = read_json(f'{HOME}/auto_adjust_state.json', {})
+    return {'recent_changes': state.get('changes', [])[-6:], 'restart_check': state.get('last_restart_check')}
+
+
 def gather_facts(env, log_start, log_end):
     api = tradeapi.REST(env['ALPACA_KEY'], env['ALPACA_SECRET'],
                         'https://paper-api.alpaca.markets', api_version='v2')
     facts = {'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M')}
     for key, fn in [('performance', lambda: gather_performance(api)), ('models', gather_models),
                     ('ml_trades_vs_spy', lambda: tally(api)),
-                    ('logs', lambda: gather_logs(log_start, log_end)), ('system', gather_system), ('settings', gather_settings)]:
+                    ('logs', lambda: gather_logs(log_start, log_end)), ('system', gather_system), ('settings', gather_settings),
+                    ('auto_adjust', gather_auto_adjust)]:
         try:
             facts[key] = fn()
         except Exception as e:
@@ -265,7 +274,12 @@ Your job:
 - settings shows whether stock buys are paused and whether the stop override is on. While stock buys
   are paused, the tally only changes through the remaining open positions.
 
-Recommend actions, but remember you are advisory only: the owner decides. Prefer the smallest,
+Recommend actions. You are advisory, with one exception: setting_changes. auto_adjust.py applies these
+automatically, without the owner, so request one only for a critical risk finding. Only risk-reducing
+changes exist (pause stock buys, switch off the stop override, cut max positions by one). Each must
+not already be in place: see settings. Loosening (e.g. restarting stock buys) is never yours to request; fixed evidence rules in
+auto_adjust.py decide that, and facts.auto_adjust shows their current state and recent changes.
+Leave setting_changes empty in most weeks. Everything else remains the owner's decision. Prefer the smallest,
 safest action. Keep each finding to a few sentences, avoid jargon, and explain any number you cite.
 The project guide below may contain outdated figures; trust the live facts over it."""
 
@@ -302,8 +316,21 @@ REVIEW_SCHEMA = {
                 'additionalProperties': False,
             },
         },
+        'setting_changes': {   # applied automatically by auto_adjust.py — risk-reducing only
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'change': {'type': 'string', 'enum': ['pause_stock_buys', 'disable_stop_override',
+                                                          'reduce_max_positions']},
+                    'reason': {'type': 'string'},
+                },
+                'required': ['change', 'reason'],
+                'additionalProperties': False,
+            },
+        },
     },
-    'required': ['status', 'headline', 'benchmark_summary', 'findings', 'recommended_actions'],
+    'required': ['status', 'headline', 'benchmark_summary', 'findings', 'recommended_actions', 'setting_changes'],
     'additionalProperties': False,
 }
 
