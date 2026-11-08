@@ -34,6 +34,7 @@ LOGS = {   # log file -> how often cron should write to it (hours), for stalenes
     'sentiment.log':       1,
     'stock_sentiment.log': 1,
     'performance.log':     24,
+    'auto_commit.log':     24,      # nightly commit + push to GitHub
 }
 
 
