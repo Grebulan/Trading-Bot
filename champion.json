@@ -1,0 +1,6 @@
+{
+ "id": "legacy_ml",
+ "cfg": null,
+ "since": "2026-03-06",
+ "note": "original ML stock picker in trader.py (stock buys paused 2026-11-08)"
+}

@@ -16,7 +16,8 @@ import pandas as pd
 from lab_data import universe_mask
 
 MENU = {
-    'universe':       ['sp500', 'sp500_tech', 'sp400', 'etf_rotation', 'leveraged_etfs', 'legacy24'],
+    # legacy24 (the old hand-picked list) is hindsight-biased: kept in lab_data for reference, not searched
+    'universe':       ['sp500', 'sp500_tech', 'sp400', 'etf_rotation', 'leveraged_etfs'],
     'signal':         ['mom_12_1', 'mom_6m', 'mom_3m', 'mom_1m', 'reversal_1w', 'rsi_oversold',
                        'near_52w_high', 'low_vol', 'risk_adj_mom'],
     'top_k':          [3, 5, 10, 15, 20],

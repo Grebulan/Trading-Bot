@@ -82,6 +82,8 @@ def block_scores(state):
     (shadow) results count 3x, because they are the honest evidence."""
     sums = {k: {} for k in MENU}
     def add(cfg, value, weight):
+        if cfg['universe'] not in MENU['universe']:   # e.g. legacy24, dropped from the search
+            return
         for k in MENU:
             key = str(cfg[k])
             s, w = sums[k].get(key, (0.0, 0.0))
