@@ -37,6 +37,8 @@ LOGS = {   # log file -> how often cron should write to it (hours), for stalenes
     'performance.log':     24,
     'auto_commit.log':     24,      # nightly commit + push to GitHub
     'auto_adjust.log':     24 * 7,  # Sunday automatic setting changes
+    'lab.log':             24 * 7,  # Sunday strategy lab
+    'champion.log':        24 * 3,  # weekdays 15:30 ET (idle while legacy_ml is champion)
 }
 
 
@@ -229,6 +231,21 @@ def gather_auto_adjust():
     return {'recent_changes': state.get('changes', [])[-6:], 'restart_check': state.get('last_restart_check')}
 
 
+def gather_lab():
+    """Strategy lab: the champion, challengers' forward (shadow) records and what has been learned."""
+    state = read_json(f'{HOME}/lab_state.json', {})
+    lessons = state.get('lessons', {})
+    best = {k: sorted(v.items(), key=lambda kv: kv[1], reverse=True)[:2] for k, v in lessons.items()}
+    return {
+        'champion': read_json(f'{HOME}/champion.json', {'id': 'legacy_ml'}),
+        'last_run': state.get('last_run'),
+        'challengers': [{'id': c['id'], 'accepted': c['accepted'], 'forward': c.get('forward'),
+                         'oos_backtest': (c.get('backtest') or {}).get('oos')} for c in state.get('challengers', [])],
+        'recent_events': state.get('events', [])[-10:],
+        'best_choices_so_far': best,   # avg excess CAGR vs SPY per menu choice (forward results weigh 3x)
+    }
+
+
 def gather_facts(env, log_start, log_end):
     api = tradeapi.REST(env['ALPACA_KEY'], env['ALPACA_SECRET'],
                         'https://paper-api.alpaca.markets', api_version='v2')
@@ -236,7 +253,7 @@ def gather_facts(env, log_start, log_end):
     for key, fn in [('performance', lambda: gather_performance(api)), ('models', gather_models),
                     ('ml_trades_vs_spy', lambda: tally(api)),
                     ('logs', lambda: gather_logs(log_start, log_end)), ('system', gather_system), ('settings', gather_settings),
-                    ('auto_adjust', gather_auto_adjust)]:
+                    ('auto_adjust', gather_auto_adjust), ('lab', gather_lab)]:
         try:
             facts[key] = fn()
         except Exception as e:
@@ -271,6 +288,13 @@ Your job:
   report the running total and how it changed since the previous review. Each trade also has
   exit_reason (from the bot's signal log) and stop_override_holds (hourly runs where the 12% stop was
   hit but the override kept holding); use them to explain losses beyond -12%.
+- lab is the strategy lab (lab.py): weekly it backtests new strategy variants, shadow-trades the best
+  as challengers, and promotes one to champion (it then trades the account via champion_trader.py)
+  when its forward record beats SPY and the account. The owner chose to let it take big risks on
+  paper (leverage, shorts, any US stock or ETF) so it can learn. Judge it on forward records, not
+  backtests; flag if it is promoting on thin evidence, churning champions, or if a champion is
+  losing heavily. Its promotions are automatic: don't recommend manual tinkering unless something
+  is broken.
 - settings shows whether stock buys are paused and whether the stop override is on. While stock buys
   are paused, the tally only changes through the remaining open positions.
 

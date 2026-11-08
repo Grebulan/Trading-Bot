@@ -12,6 +12,9 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 | `record_milestone.py` | Weekly Sunday portfolio snapshot |
 | `weekly_review.py` | Sunday review agent — gathers facts, asks Claude (needs `ANTHROPIC_API_KEY`), writes `weekly_reviews.json` for `/review`. Advisory only |
 | `auto_adjust.py` | Sunday 5am, after the review: applies the review's risk-reducing `setting_changes` to `trader.py`, and restarts stock buys only when fixed evidence rules pass. Commits, pushes and emails every change. State in `auto_adjust_state.json`. `--dry-run` to preview |
+| `lab.py`, `lab_engine.py`, `lab_data.py` | Strategy lab: weekly search, backtests, shadow trading, promotion (see below) |
+| `champion_trader.py` | Trades the lab's champion strategy (leverage/shorts allowed) |
+| `champion.json`, `lab_state.json` | Current champion; challengers, everything tested, lessons |
 | `trade_tally.py` | Every ML stock trade since 2026-10-04 vs leaving the money in SPY, with each exit reason and how many times the stop override held it (from `performance.json`). Run it directly for a table; also feeds the weekly review |
 | `milestones.json` | Portfolio history (Sharpe, returns, positions) |
 | `stock_highwater.json` | Peak prices for trailing stops |
@@ -25,6 +28,8 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 - **Weekly milestone:** Sunday 4am (`record_milestone.py`)
 - **Weekly review agent:** Sunday 4:30am (`weekly_review.py`)
 - **Auto-adjust:** Sunday 5:00am (`auto_adjust.py`, logs to `auto_adjust.log`)
+- **Strategy lab:** Sunday 3:00am (`lab.py`, `lab.log`)
+- **Champion trader:** weekdays 15:30 ET via `run_trader_et.sh` (`champion_trader.py`, `champion.log`). Does nothing while `legacy_ml` is champion
 - **Weekly retrain:** Sunday (runs before milestone)
 - **Log timestamps (2026-10-20):** cron jobs pipe output through `logts.sh`, which adds a time to each line (`PYTHONUNBUFFERED=1` is set in crontab so the times are accurate). `retrain.log` already has its own timestamps. `weekly_review.py` only reports log errors written since the previous review. It keeps its read position in `weekly_review_logstate.json`.
 
@@ -40,6 +45,16 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 - **Model evaluation:** `retrain.py` scores both models on a time split and logs HAS EDGE/NO EDGE (`has_edge` in `model_info.json` / `crypto_model_info.json`). Ignore raw accuracy, which sits at or below the always-no baseline. Stocks (2026-11-08): `has_edge` comes from `live_rule_test`, which replays the test period as real trades (one position per ticker, 12% trailing stop, +20% TP, SPY/VIX filters) and compares them with SPY and with random buys of the same tickers. It needs ≥50 trades and a gain over random buys of at least 2 standard errors. First result: 154 trades, +3.6% vs SPY per trade, but random buys of the same stocks also make +1.8%, so the model adds +1.9% ±1.0%, giving NO EDGE (just short of the bar). The old label test (`pick_hit_rate` ~55% vs ~35%) counts every flagged day and overstates the edge.
 - **Crypto buys paused (2026-10-04):** `BUYS_PAUSED = True` in `crypto_trader.py`. Time-split test showed no edge. Existing positions still exit via stops. `retrain.py` now evaluates crypto on recent data and logs `HAS EDGE`/`NO EDGE` (also `has_edge` in `crypto_model_info.json`); re-enable only on evidence.
 - **SPY crash exits:** 5% trailing stop OR VIX > 40 OR SPY below 200-day MA (bear regime)
+
+## Strategy lab: champion vs challengers (2026-11-08)
+The owner wants the bot to evolve by itself on paper, taking as much risk as it likes, including leverage and shorts. Before any real money, the best version found is frozen for ~3 months as a final untouched test.
+- **`lab_data.py`:** universes are the S&P 500 (a stock is eligible only after its index join date, which limits hindsight), S&P 500 tech, S&P 400, ETF rotation, leveraged ETFs, and `legacy24`. `legacy24` is hindsight-biased and can never be promoted. Prices are cached in `lab_prices.pkl`.
+- **`lab_engine.py`:** the `MENU` of building blocks (universe, signal, top_k, rebalance, weighting, leverage up to 2×, shorts, SPY regime, trailing stop) and the daily backtester. It charges costs, margin interest and borrow fees. The same `weights_at` drives backtests, shadow records and live trading.
+- **`lab.py`, weekly:** generates 24 candidates (mutations of the best, plus samples weighted by the lessons) and backtests each on in-sample 2015–2022 and out-of-sample 2023–now, against random picks from the same universe. A candidate must beat SPY and random in both periods to become a challenger (max 10). Challengers shadow-trade from the day after acceptance.
+- **Promotion:** after ≥40 trading days, a challenger must beat SPY and beat the real account by 2% over the same window. At most one promotion per 28 days.
+- **Demotion and retirement:** a champion 25% behind SPY is demoted to `spy_hold`. Challengers retire after 80 days without promotion, or after 30 days if 10% behind SPY. Results feed `lessons` in `lab_state.json`.
+- **`champion.json`:** the active champion. `legacy_ml` means `trader.py` trades as before; `spy_hold` means all SPY; anything else, `champion_trader.py` trades it and `trader.py` stands aside. Promotions are committed, pushed and emailed. To go back by hand, set `id` to `legacy_ml`.
+- `python3 lab.py --dry-run`, `python3 champion_trader.py --dry-run` to preview.
 
 ## Bounded autonomy (2026-11-08)
 The bot can change a few of its own settings in `trader.py`, through `auto_adjust.py`.

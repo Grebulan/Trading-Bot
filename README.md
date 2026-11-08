@@ -26,6 +26,10 @@ So far the bot has not beaten simply holding SPY:
   the bot's own exit rules, and compares them with SPY and with random buys of the same stocks. On that
   test the stock model adds about +1.9% per trade (±1.0%) over random buys. That falls just short of
   the "has edge" bar.
+- **It now evolves by itself.** Each week a strategy lab invents and tests new strategy variants:
+  different stocks and ETFs, signals, leverage and short-selling. Promising ones are "shadow-traded"
+  (tracked without risking the account), and one that beats both SPY and the live bot over 8+ weeks
+  takes over the account. See [Strategy lab](#strategy-lab).
 - **Real money:** 2027 at the earliest. To get there, the bot must beat SPY over the period, show a
   positive trade tally and reach a Sharpe ratio above 1.0.
 
@@ -44,6 +48,28 @@ So far the bot has not beaten simply holding SPY:
    if SPY falls below its 200-day average.
 5. **Crypto.** The same approach on hourly data for 10 coins. Buys are currently paused.
 
+## Strategy lab
+
+The bot is free to take big risks on paper so it can learn. The lab is built so that it learns from
+real results, not from luck or hindsight:
+
+1. **Menu.** Strategies are built from blocks: universe (S&P 500, S&P 500 tech, S&P 400 mid-caps,
+   sector/asset ETFs, leveraged ETFs), signal (several momentum, reversal, 52-week-high and
+   low-volatility variants), number of holdings, how often to rebalance, weighting, leverage (up to
+   2×), share of the book that is short, a market-regime filter and a trailing stop.
+2. **Weekly search.** 24 new combinations a week. Some are tweaks of the best so far; the rest are
+   sampled using what has worked before.
+3. **Two backtests and a fair baseline.** Each candidate is tested on 2015–2022 and again on
+   2023–now. It must beat SPY and random picks from the same stocks in both. A stock only counts
+   from the date it joined the S&P 500, so the test can't pick tomorrow's winners with hindsight.
+4. **Shadow trading.** Survivors are tracked forward from the day they were chosen, using prices
+   that didn't exist when they were picked. That is the honest test.
+5. **Promotion.** A challenger with 8+ weeks of forward record that beats SPY and beats the real
+   account by 2% becomes the champion and trades the account. A champion that falls 25% behind SPY
+   is replaced by plain SPY until something better earns the slot.
+6. **Lessons.** Every promotion and retirement updates a score for each building block, which steers
+   the next week's search.
+
 ## Files
 
 | File | Purpose |
@@ -60,6 +86,10 @@ So far the bot has not beaten simply holding SPY:
 | `run_trader_et.sh` | Runs `trader.py` at fixed US Eastern times, despite UK/US clock changes |
 | `logts.sh` | Adds timestamps to cron log output |
 | `auto_commit.sh` | Nightly commit and push of the source files to this repo |
+| `lab.py`, `lab_engine.py`, `lab_data.py` | Strategy lab: search, backtests, shadow trading, promotion |
+| `champion_trader.py` | Trades the current champion strategy |
+| `champion.json` | Which strategy is champion |
+| `auto_adjust.py` | Applies the weekly review's risk-reducing setting changes to the original bot |
 | `CLAUDE.md` | Detailed project notes and change history |
 
 ## Schedule (cron, UK time on the Pi)
@@ -74,7 +104,10 @@ So far the bot has not beaten simply holding SPY:
 | Daily 23:00 | `auto_commit.sh` |
 | Sunday 02:15 | `retrain.py` |
 | Sunday 04:00 | `record_milestone.py` |
+| Sunday 03:00 | `lab.py` (strategy lab) |
 | Sunday 04:30 | `weekly_review.py` |
+| Sunday 05:00 | `auto_adjust.py` |
+| Weekdays 15:30 ET | `champion_trader.py` |
 
 ## Setup
 

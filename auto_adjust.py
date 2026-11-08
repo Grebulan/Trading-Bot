@@ -218,11 +218,12 @@ UNDO = {
 }
 
 
-def git_commit_push(message):
+def git_commit_push(message, paths=('trader.py',)):
+    """Commit the given files and push. Also used by lab.py. Returns (short sha, error or None)."""
     def run(*cmd):
         return subprocess.run(cmd, cwd=HOME, capture_output=True, text=True,
                               env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
-    run('git', 'add', 'trader.py')
+    run('git', 'add', *paths)
     r = run('git', 'commit', '-q', '-m', message)
     if r.returncode != 0:
         return None, f'commit failed: {r.stderr.strip() or r.stdout.strip()}'

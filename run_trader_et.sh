@@ -6,4 +6,6 @@ NOW_ET=$(TZ=America/New_York date +%H:%M)
 case "$NOW_ET" in
   09:05|10:05|11:05|12:05|13:05|14:05|15:05|15:55)
     exec python3 /home/jv/trader.py ;;
+  15:30)   # strategy lab champion (does nothing while the original ML bot is champion)
+    exec python3 /home/jv/champion_trader.py ;;
 esac

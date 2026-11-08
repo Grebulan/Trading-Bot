@@ -254,6 +254,17 @@ def fund_from_spy(needed, spy_state):
     return 0.0
 
 def run():
+    # Strategy lab (2026-11-08): once lab.py promotes another champion, champion_trader.py trades
+    # the stock account and this bot stands aside (including the SPY default)
+    try:
+        with open('/home/jv/champion.json') as f:
+            champion = json.load(f).get('id', 'legacy_ml')
+    except Exception:
+        champion = 'legacy_ml'
+    if champion != 'legacy_ml':
+        print(f"👑 Champion is {champion} — champion_trader.py trades stocks; nothing to do")
+        return
+
     account = api.get_account()
     cash    = float(account.cash)
     equity  = float(account.equity)
