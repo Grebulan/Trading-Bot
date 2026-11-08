@@ -8,7 +8,8 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 git add crypto_features.json crypto_sentiment.py crypto_trader.py \
         dashboard.py features.json finbert_service.py performance_log.py \
         retrain.py sentiment.py trader.py \
-        weekly_review.py trade_tally.py CLAUDE.md auto_commit.sh
+        weekly_review.py trade_tally.py CLAUDE.md auto_commit.sh \
+        README.md record_milestone.py run_trader_et.sh logts.sh
 
 # Only commit if there are staged changes
 if ! git diff --cached --quiet; then

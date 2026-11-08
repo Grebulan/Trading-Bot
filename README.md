@@ -1,0 +1,114 @@
+# Raspberry Pi Trading Bot
+
+An algorithmic trading bot that runs on a Raspberry Pi 5. It trades US stocks and crypto through
+[Alpaca's](https://alpaca.markets) **paper-trading** API, using machine-learning models (XGBoost) to
+pick buys and parking spare cash in the S&P 500 ETF (SPY).
+
+> **No real money.** This is a paper-trading experiment that started in March 2026 with $100,000 of
+> simulated capital. Nothing here is investment advice.
+
+## Status (November 2026)
+
+So far the bot has not beaten simply holding SPY:
+
+| | Since March 2026 |
+|---|---|
+| Bot | −5.7% |
+| SPY | +10.2% |
+| Sharpe ratio | −1.78 (target: above 1.0) |
+
+- **Stock buys are paused** (since 2026-11-08). The ML stock picks finished $8,900 behind leaving the
+  same money in SPY, and only 1 of 12 closed trades beat SPY. The bot still logs the buys it *would*
+  make, which gives a free forward test of the model.
+- **Crypto buys are paused** (since 2026-10-04). Tested on recent data, the crypto model's picks are no
+  better than chance.
+- **A more honest model test.** The weekly retrain now replays the test period as real trades, under
+  the bot's own exit rules, and compares them with SPY and with random buys of the same stocks. On that
+  test the stock model adds about +1.9% per trade (±1.0%) over random buys. That falls just short of
+  the "has edge" bar.
+- **Real money:** 2027 at the earliest. To get there, the bot must beat SPY over the period, show a
+  positive trade tally and reach a Sharpe ratio above 1.0.
+
+## How it works
+
+1. **Signals.** An XGBoost model scores 24 stocks every trading hour. It is trained on 15 years of
+   daily data with technical, sector and market features (VIX, SPY and QQQ trends). It predicts
+   whether a stock will rise +20% before it falls −12% within 60 trading days. It buys at ≥60%
+   confidence, and only when SPY is above its 200-day average, VIX is ≤28 and recent news isn't
+   negative. News sentiment comes from FinBERT and VADER.
+2. **Position sizing.** Each stock buy is 8% of equity, with at most 6 stocks at a time. If there isn't
+   enough cash, the bot sells just enough SPY to fund the buy.
+3. **Exits.** A 12% trailing stop from the stock's peak, or a +20% take-profit. The model only predicts
+   buys, so there are no ML sell signals.
+4. **SPY default.** Spare cash sits in SPY. SPY is sold on a 5% trailing stop, if VIX goes above 40, or
+   if SPY falls below its 200-day average.
+5. **Crypto.** The same approach on hourly data for 10 coins. Buys are currently paused.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `trader.py` | Stock trading run: signals, buys, stops, SPY default |
+| `crypto_trader.py` | Crypto trading run |
+| `retrain.py` | Weekly model retrain and evaluation (writes `model_info.json`) |
+| `sentiment.py`, `crypto_sentiment.py`, `finbert_service.py` | News sentiment scoring |
+| `dashboard.py` | Flask web dashboard (port 5000, password login) |
+| `trade_tally.py` | Every ML stock trade vs leaving the money in SPY, with exit reasons |
+| `weekly_review.py` | Sunday review: gathers facts and asks Claude for a plain-English assessment |
+| `record_milestone.py` | Weekly portfolio snapshot (used for the Sharpe ratio) |
+| `record_portfolio.py`, `performance_log.py`, `email_summary.py` | Portfolio history, signal outcomes, daily email |
+| `run_trader_et.sh` | Runs `trader.py` at fixed US Eastern times, despite UK/US clock changes |
+| `logts.sh` | Adds timestamps to cron log output |
+| `auto_commit.sh` | Nightly commit and push of the source files to this repo |
+| `CLAUDE.md` | Detailed project notes and change history |
+
+## Schedule (cron, UK time on the Pi)
+
+| When | Job |
+|---|---|
+| Hourly 09:05–15:05 ET, plus 15:55 ET | `trader.py` (via `run_trader_et.sh`) |
+| Every 2 hours at :07 | `crypto_trader.py` |
+| Hourly | News sentiment refresh |
+| Every 30 min | `record_portfolio.py` |
+| Daily 22:10 | `email_summary.py` |
+| Daily 23:00 | `auto_commit.sh` |
+| Sunday 02:15 | `retrain.py` |
+| Sunday 04:00 | `record_milestone.py` |
+| Sunday 04:30 | `weekly_review.py` |
+
+## Setup
+
+Requires Python 3.11 and these packages: `alpaca-trade-api`, `yfinance`, `xgboost`, `scikit-learn`,
+`pandas`, `numpy`, `joblib`, `flask`, `newsapi-python`, `vaderSentiment`, `transformers`, `torch`,
+`anthropic`, `requests`.
+
+Keys go in `~/.env_trading` (never committed):
+
+```
+ALPACA_KEY=...
+ALPACA_SECRET=...
+NEWS_KEY=...              # NewsAPI
+CRYPTOPANIC_KEY=...
+GMAIL_USER=...
+GMAIL_APP_PASSWORD=...
+GMAIL_TO=...
+DASHBOARD_PASSWORD=...
+DASHBOARD_SECRET_KEY=...
+ANTHROPIC_API_KEY=...     # weekly review only
+```
+
+Run `python3 retrain.py` once to build the models, then add the cron jobs above. File paths in the
+scripts assume the code lives in `/home/jv`.
+
+## Lessons so far
+
+- **Check accuracy against a baseline.** The crypto model once reported 80% accuracy. Tested properly,
+  it scores below simply always guessing "no".
+- **Test on the future, not on other tickers.** An early split tested on held-out *stocks*, not on
+  later *dates*, which made the models look far better than they were.
+- **Count trades, not flagged days.** The first stock test counted every day a stock was flagged as a
+  separate pick, so 1,000 "picks" were really about 130 trades. Scored as real trades, the claimed
+  edge halved.
+- **Beware a hindsight-picked watchlist.** Random buys of the same 24 stocks also beat SPY, because the
+  list was chosen in 2026 from stocks that had already done well.
+- **Compare everything with SPY.** It's the bar the bot has to clear, and so far it hasn't.
