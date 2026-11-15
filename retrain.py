@@ -242,7 +242,15 @@ def live_rule_eval(test_df, proba, prices, buy_confidence):
     regime  = (spy_c > spy_c.rolling(200).mean())
     df = test_df[['Ticker', 'VIX']].copy()
     df['proba'] = proba
+    flagged_all = int((df['proba'] >= buy_confidence).sum())   # diagnostics (2026-11-15)
     df = df[(df['VIX'] <= LIVE_VIX_MAX) & regime.reindex(df.index).fillna(False).values]
+    diag = {
+        'test_from':           f"{test_df.index.min():%Y-%m-%d}",
+        'test_to':             f"{test_df.index.max():%Y-%m-%d}",
+        'flagged_days':        flagged_all,                                   # proba >= conf, before filters
+        'flagged_after_filters': int((df['proba'] >= buy_confidence).sum()),  # still flagged after SPY/VIX filters
+        'eligible_days':       int(len(df)),                                  # rows random buys draw from
+    }
 
     model_out, random_out = [], []
     for ticker, rows in df.groupby('Ticker'):
@@ -260,7 +268,7 @@ def live_rule_eval(test_df, proba, prices, buy_confidence):
                 busy_until = j
     m, r = np.array(model_out, dtype=float), np.array(random_out, dtype=float)
     if len(m) == 0:
-        return {'trades': 0, 'has_edge': False}
+        return {'trades': 0, 'has_edge': False, **diag}
     se    = float(m[:, 2].std(ddof=1) / np.sqrt(len(m))) if len(m) > 1 else float('nan')
     extra = float(m[:, 2].mean() - r[:, 2].mean())
     return {
@@ -275,6 +283,7 @@ def live_rule_eval(test_df, proba, prices, buy_confidence):
         'standard_error':      se,
         # Needs enough trades, and the model's gain over random buys must be clear of noise
         'has_edge':            bool(len(m) >= 50 and extra >= 2 * se),
+        **diag,
     }
 
 def retrain_stocks():
@@ -383,12 +392,15 @@ def retrain_stocks():
         p(f"   Live-rule test: {lr['trades']} trades — hit TP {lr['tp_rate']:.1%} (random {lr['random_tp_rate']:.1%}), "
           f"avg {lr['avg_return']:+.1%}/trade, vs SPY {lr['avg_vs_spy']:+.1%} (random buys {lr['random_avg_vs_spy']:+.1%}), "
           f"beat SPY {lr['beat_spy']:.0%}")
+    p(f"   Live-rule window {lr['test_from']} to {lr['test_to']}: {lr['flagged_days']:,} flagged days, "
+      f"{lr['flagged_after_filters']:,} left after SPY/VIX filters, {lr['eligible_days']:,} eligible days for random buys")
     p(f"   Model's gain over random buys: {lr.get('extra_vs_random', 0):+.1%}/trade "
       f"(±{lr.get('standard_error', 0):.1%})  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
 
     # Deploy a model refit on all labelled data (all tickers, incl. the recent test period)
     p("⚡ Refitting on all data for deployment...")
-    model = make_model(model.best_iteration + 1, early_stop=False)
+    eval_best_iter = int(model.best_iteration)
+    model = make_model(eval_best_iter + 1, early_stop=False)
     model.fit(combined[STOCK_FEATURES], combined['Target'], verbose=False)
 
     joblib.dump(model, '/home/jv/trading_model.joblib')
@@ -417,6 +429,12 @@ def retrain_stocks():
                 'extra_vs_random':   f"{lr.get('extra_vs_random', 0):+.1%}",
                 'standard_error':    f"{lr.get('standard_error', 0):.1%}",
                 'beat_spy':          f"{lr.get('beat_spy', 0):.0%}",
+                'test_from':         lr['test_from'],
+                'test_to':           lr['test_to'],
+                'flagged_days':      lr['flagged_days'],
+                'flagged_after_filters': lr['flagged_after_filters'],
+                'eligible_days':     lr['eligible_days'],
+                'best_iteration':    eval_best_iter,
                 'rule': 'one position per ticker, 12% trailing stop, +20% TP, 60-day max, SPY>200MA, VIX<=28; '
                         'has_edge needs >=50 trades and extra_vs_random >= 2 standard errors',
             },
@@ -589,10 +607,32 @@ def retrain_crypto():
     p(f"   BUY precision: {buy_prec:.1%} vs random {base_rate:.1%}  →  edge {edge:+.1%} "
       f"on {n_buys:,} BUY calls  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
 
+    # Diagnostics only (2026-11-15) — they do not change has_edge. The 2026-11-15 retrain flipped to
+    # HAS EDGE from a model that stopped after 2 trees: its probabilities barely moved off 0.5, it called
+    # BUY on ~65% of test hours, and every coin read 50.7% live. Hourly calls overlap a 720h label, and
+    # the coins move together, so the real number of independent outcomes is tiny.
+    eval_best_iter = int(model.best_iteration)
+    proba_test     = model.predict_proba(test_df[CRYPTO_FEATURES])[:, 1]
+    proba_spread   = float(np.percentile(proba_test, 90) - np.percentile(proba_test, 10))
+    buy_share      = n_buys / max(len(test_df), 1)
+    test_hours     = (test_df.index.max() - test_df.index.min()).total_seconds() / 3600
+    horizon_hours  = LABEL_HORIZON.total_seconds() / 3600
+    indep_windows  = int(test_hours / horizon_hours * len(crypto_data))
+    caveats = []
+    if eval_best_iter < 10:
+        caveats.append(f'model stopped after {eval_best_iter + 1} trees (barely trained)')
+    if proba_spread < 0.05:
+        caveats.append(f'scores barely vary (10th-90th percentile spread {proba_spread:.3f})')
+    if buy_share > 0.5:
+        caveats.append(f'calls BUY on {buy_share:.0%} of test hours (not selective)')
+    caveats.append(f'~{indep_windows} non-overlapping 720h windows across all coins, '
+                   f'fewer in practice as coins move together')
+    p(f"   Crypto edge caveats: {'; '.join(caveats)}")
+
     # Deploy a model refit on all labelled data (incl. the recent test period) with the
     # tree count found above, so live predictions reflect the latest regime.
     p("⚡ Refitting on all data for deployment...")
-    model = make_model(model.best_iteration + 1, early_stop=False)
+    model = make_model(eval_best_iter + 1, early_stop=False)
     model.fit(combined[CRYPTO_FEATURES], combined['Target'], verbose=False)
 
     joblib.dump(model, '/home/jv/crypto_model.joblib')
@@ -609,6 +649,11 @@ def retrain_crypto():
             'edge':          f"{edge:+.1%}",
             'has_edge':      has_edge,
             'test_buy_calls': n_buys,
+            'best_iteration': eval_best_iter,
+            'proba_spread_10_90': round(proba_spread, 4),
+            'buy_call_share': f"{buy_share:.0%}",
+            'independent_windows_approx': indep_windows,
+            'edge_caveats':  caveats,
             'evaluation':    f"time split, test from {test_cut:%Y-%m-%d}, 720h purge gap",
             'features':      len(CRYPTO_FEATURES),
             'training_rows': len(combined),
