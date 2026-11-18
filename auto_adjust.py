@@ -48,8 +48,9 @@ FIRST_PAUSE      = '2026-11-08'  # stock buys paused by hand, before this script
 RESTART_MIN_WEEKS_PAUSED = 8     # weeks of forward-test signals since the pause
 RESTART_MIN_TRADES       = 20    # hypothetical trades from 'buys_paused' signals
 RESTART_MIN_CLOSED       = 10    # ...of which finished
-# plus: forward trades ahead of SPY in total, retrain's live-rule test says has_edge,
-# and this week's review is not red
+RESTART_EDGE_STREAK      = 3     # has_edge true in this many retrains in a row (owner-approved 2026-11-18:
+                                 # the live-rule edge moved by ~its own error bar in a week with no code change)
+# plus: forward trades ahead of SPY in total, and this week's review is not red
 
 
 def read_json(path, default):
@@ -159,6 +160,23 @@ def last_change(state, setting):
     return None
 
 
+def record_edge(state, info):
+    """Add this retrain's has_edge to state['edge_history'] (one entry per retrain, keyed by trained_at).
+    Returns how many of the most recent retrains in a row said has_edge."""
+    hist = state.setdefault('edge_history', [])
+    trained_at = info.get('trained_at')
+    if trained_at and not any(h['trained_at'] == trained_at for h in hist):
+        hist.append({'trained_at': trained_at, 'has_edge': info.get('has_edge') is True})
+        hist.sort(key=lambda h: h['trained_at'])
+        del hist[:-26]                     # keep about six months
+    streak = 0
+    for h in reversed(hist):
+        if not h['has_edge']:
+            break
+        streak += 1
+    return streak
+
+
 def plan_changes(src, review, state):
     """List of (setting, new_value, description, reason, source) to apply this run."""
     plans, notes = [], []
@@ -191,18 +209,21 @@ def plan_changes(src, review, state):
         fwd = forward_test(paused_since)
         weeks = (datetime.now() - datetime.fromisoformat(paused_since)).days / 7
         info = read_json(MODEL_INFO, {})
+        edge_streak = record_edge(state, info)
         rules = {
             f'paused at least {RESTART_MIN_WEEKS_PAUSED} weeks': weeks >= RESTART_MIN_WEEKS_PAUSED,
             f'at least {RESTART_MIN_TRADES} forward-test trades': fwd['trades'] >= RESTART_MIN_TRADES,
             f'at least {RESTART_MIN_CLOSED} of them finished': fwd['closed'] >= RESTART_MIN_CLOSED,
             'forward-test trades ahead of SPY in total': fwd['total_vs_spy_pct'] > 0,
-            "retrain's live-rule test says has_edge": info.get('has_edge') is True,
+            f"retrain's live-rule test says has_edge {RESTART_EDGE_STREAK} retrains in a row":
+                info.get('has_edge') is True and edge_streak >= RESTART_EDGE_STREAK,
             "this week's review is not red": bool(review) and review.get('status') != 'red',
             f'no change to stock buys in the last {COOLING_OFF_DAYS} days':
                 not last or (datetime.now() - datetime.fromisoformat(last['date'])).days >= COOLING_OFF_DAYS,
         }
         check = {'date': datetime.now().strftime('%Y-%m-%d'), 'paused_since': paused_since,
                  'weeks_paused': round(weeks, 1), 'forward_test': fwd, 'rules': rules,
+                 'edge_streak': edge_streak,
                  'all_pass': all(rules.values())}
         if check['all_pass']:
             plans.append(('BUYS_PAUSED', 'False', 'Restarted stock buys',

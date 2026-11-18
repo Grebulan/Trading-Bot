@@ -601,13 +601,20 @@ def retrain_crypto():
     n_buys     = int(preds_test.sum())
     buy_prec   = precision_score(y_test, preds_test, zero_division=0)
     edge       = buy_prec - base_rate
-    # Edge = model's BUY calls hit TP more often than random entries, on enough calls to mean something
-    has_edge   = bool(edge >= 0.03 and n_buys >= 200)
+    # Edge = model's BUY calls hit TP more often than random entries, on enough calls to mean something,
+    # from a model that actually trained (owner-approved 2026-11-18: the 2026-11-15 "HAS EDGE" came from a
+    # model that stopped at best iteration 1, i.e. 2 trees, whose scores barely moved off 0.5)
+    CRYPTO_MIN_BEST_ITER = 10
+    has_edge   = bool(edge >= 0.03 and n_buys >= 200 and model.best_iteration >= CRYPTO_MIN_BEST_ITER)
     p(f"✅ Crypto accuracy: {acc:.1%}  (always-no baseline: {baseline:.1%}, best iteration: {model.best_iteration})")
     p(f"   BUY precision: {buy_prec:.1%} vs random {base_rate:.1%}  →  edge {edge:+.1%} "
       f"on {n_buys:,} BUY calls  {'✅ HAS EDGE' if has_edge else '⚠️  NO EDGE'}")
 
-    # Diagnostics only (2026-11-15) — they do not change has_edge. The 2026-11-15 retrain flipped to
+    if edge >= 0.03 and n_buys >= 200 and not has_edge:
+        p(f"   (edge bar met, but best iteration {model.best_iteration} < {CRYPTO_MIN_BEST_ITER}: "
+          f"model barely trained, so NO EDGE)")
+
+    # Diagnostics (2026-11-15). Apart from best iteration (above), they do not change has_edge. The 2026-11-15 retrain flipped to
     # HAS EDGE from a model that stopped after 2 trees: its probabilities barely moved off 0.5, it called
     # BUY on ~65% of test hours, and every coin read 50.7% live. Hourly calls overlap a 720h label, and
     # the coins move together, so the real number of independent outcomes is tiny.
