@@ -60,7 +60,10 @@ PROTECTED_LINES = {
     'champion_trader.py': ["api = tradeapi.REST(env['ALPACA_KEY'], env['ALPACA_SECRET'], 'https://paper-api.alpaca.markets',"],
     'lab_engine.py':      ['COST_BPS        = 5', 'MARGIN_RATE     = 0.065', 'BORROW_FEE      = 0.005',
                            'MAX_GROSS_LIVE  = 1.95'],
-    'retrain.py':         ["'has_edge':            bool(len(m) >= 50 and extra >= 2 * se),"],
+    'retrain.py':         ["'has_edge':            bool(len(m) >= 50 and extra >= 2 * se),",
+                           # crypto bar, owner-approved 2026-11-18
+                           'CRYPTO_MIN_BEST_ITER = 10',
+                           'has_edge   = bool(edge >= 0.03 and n_buys >= 200 and model.best_iteration >= CRYPTO_MIN_BEST_ITER)'],
 }
 
 

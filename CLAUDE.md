@@ -57,7 +57,7 @@ An algorithmic trading bot running on a Raspberry Pi. Uses the **Alpaca paper tr
 ## Self-improvement agent (2026-11-08)
 The owner delegated decisions to the bot: they are not a trader and want it to act on its own recommendations. `bot_agent.py` runs Claude (Opus 5.5) through the API with its own narrow tools: read code, data and logs; edit `EDITABLE` files; create new `.py` files; `run_backtest`; `run_checks`; `finish`.
 - **Protected, the scorekeeping:** `weekly_review.py`, `trade_tally.py`, `lab.py` (promotion rules), `auto_adjust.py`, `weekly_email.py`, `bot_agent.py`, the shell scripts and `champion.json`. These stop the bot grading its own homework.
-- **Protected lines:** the paper-trading URLs, backtest costs, the 1.95× leverage cap and the `has_edge` bar.
+- **Protected lines:** the paper-trading URLs, backtest costs, the 1.95× leverage cap and the stock and crypto `has_edge` bars (crypto pinned 2026-11-18, including `CRYPTO_MIN_BEST_ITER = 10`).
 - **Off limits:** it can never read `~/.env_trading`.
 - **Before anything is kept,** compile, new pylint errors, imports of `trader`/`crypto_trader`, and dry runs of lab, champion (current champion and a leveraged long/short test strategy) and auto-adjust must all pass. Otherwise every change is reverted from `.agent_backup/`.
 - **Passing changes** are committed and pushed with the agent's message and reported in the weekly email. Anything it thinks needs a protected change goes in its `not_done` list for the owner.
